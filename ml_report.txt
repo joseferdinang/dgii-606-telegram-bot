@@ -1,0 +1,14 @@
+=== CLASSIFICATION REPORT: DOMINICAN INVOICE FIELD EXTRACTOR ===
+Total samples: 294188 tokens
+                   precision    recall  f1-score   support
+
+fecha_comprobante     1.0000    1.0000    1.0000       600
+       irrelevant     0.9997    0.9996    0.9997     55936
+  itbis_facturado     0.9457    0.9721    0.9587       502
+      monto_total     0.9678    0.9517    0.9597       600
+              ncf     1.0000    1.0000    1.0000       600
+       rnc_cedula     0.9983    1.0000    0.9992       600
+
+         accuracy                         0.9989     58838
+        macro avg     0.9853    0.9872    0.9862     58838
+     weighted avg     0.9989    0.9989    0.9989     58838

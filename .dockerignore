@@ -1,0 +1,9 @@
+.git
+.env
+env.txt
+credentials/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/
+tests/__pycache__/

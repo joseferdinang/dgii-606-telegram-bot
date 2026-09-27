@@ -1,0 +1,20 @@
+# Telegram bot
+python-telegram-bot==21.*
+
+# OCR, Computer Vision & QR
+google-cloud-vision
+Pillow
+pdf2image
+opencv-python-headless
+
+# Machine Learning & Data Processing
+scikit-learn>=1.5
+pandas>=2.2
+numpy>=2.0
+joblib>=1.4
+
+# DGII 606 xlsx export
+openpyxl
+
+# Environment configuration
+python-dotenv
