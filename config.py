@@ -20,6 +20,8 @@ class Settings:
     state_db_path: Path
     export_directory: Path
     reporting_rnc: str | None
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
 
 
 def load_settings() -> Settings:
@@ -57,4 +59,6 @@ def load_settings() -> Settings:
         state_db_path=state_db_path,
         export_directory=export_directory,
         reporting_rnc=os.getenv("DGII_REPORTING_RNC", "").strip() or None,
+        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
     )

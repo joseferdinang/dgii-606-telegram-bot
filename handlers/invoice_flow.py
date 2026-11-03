@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from fiscal_validators import normalize_extracted_fields
-from handlers.confirmation_handler import send_category_selection, send_missing_field_prompt
+from handlers.confirmation_handler import send_missing_field_prompt
 from ocr_engine import REQUIRED_FIELDS
 from state_manager import UserState, state_manager
 
@@ -20,8 +21,31 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
     message = update.message
     
     raw_fields = dict(getattr(result, "fields", {}))
-    ml_extractor = context.bot_data.get("ml_extractor") if context and hasattr(context, "bot_data") else None
     raw_text = getattr(result, "raw_text", "")
+
+    # 1. Extractor LLM (OpenAI ChatGPT)
+    llm_extractor = context.bot_data.get("llm_extractor") if context and hasattr(context, "bot_data") else None
+    if llm_extractor and llm_extractor.is_available and raw_text:
+        try:
+            llm_extracted = await asyncio.to_thread(llm_extractor.extract_from_text, raw_text)
+            if llm_extracted:
+                logger.info("LLM extraction completed for chat_id=%s. Extracted fields: %s", chat_id, list(llm_extracted.keys()))
+                # Preservar campos que vinieron del código QR (confianza 1.0)
+                qr_fields = {
+                    k: v for k, v in raw_fields.items()
+                    if getattr(result, "confidence", {}).get(k) == 1.0
+                }
+                # Los campos de ChatGPT tienen alta prioridad sobre regex / heurística
+                for k, v in llm_extracted.items():
+                    if v not in (None, ""):
+                        raw_fields[k] = v
+                # Re-aplicar QR para asegurar integridad absoluta
+                raw_fields.update(qr_fields)
+        except Exception:
+            logger.exception("Error running LLM extractor on OCR text for chat_id=%s", chat_id)
+
+    # 2. Extractor ML secundario (si está disponible y hay campos faltantes)
+    ml_extractor = context.bot_data.get("ml_extractor") if context and hasattr(context, "bot_data") else None
     if ml_extractor and ml_extractor.available and raw_text:
         try:
             ml_extracted = ml_extractor.extract(raw_text)

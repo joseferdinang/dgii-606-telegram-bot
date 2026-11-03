@@ -7,13 +7,14 @@ Pillow
 pdf2image
 opencv-python-headless
 
-# Machine Learning & Data Processing
+# Machine Learning, LLM & Data Processing
+openai>=1.30
 scikit-learn>=1.5
 pandas>=2.2
 numpy>=2.0
 joblib>=1.4
 
-# DGII 606 xlsx export
+# DGII 606 export
 openpyxl
 
 # Environment configuration

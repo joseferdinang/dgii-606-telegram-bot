@@ -286,7 +286,12 @@ async def proceed_to_next_step(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if session.extracted_data.get("tipo_bienes_servicios"):
         if session.extracted_data.get("forma_pago"):
-            await send_amount_allocation(update, context)
+            has_bienes = session.extracted_data.get("monto_bienes") is not None
+            has_servicios = session.extracted_data.get("monto_servicios") is not None
+            if has_bienes and has_servicios:
+                await show_validation_or_preview(update, context)
+            else:
+                await send_amount_allocation(update, context)
         else:
             await send_forma_pago_selection(update, context)
     else:

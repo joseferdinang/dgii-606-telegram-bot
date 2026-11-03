@@ -31,6 +31,7 @@ from handlers.confirmation_handler import (
 from handlers.exchange_rate_handler import handle_exchange_rate_input
 from handlers.pdf_handler import handle_invoice_pdf
 from handlers.photo_handler import handle_invoice_photo
+from llm_extractor import LLMFieldExtractor
 from ml_extractor import MLFieldExtractor
 from ocr_engine import InvoiceOCREngine
 from state_manager import UserState, state_manager
@@ -161,6 +162,10 @@ def build_application() -> Application:
     application.bot_data["excel_exporter"] = Excel606Exporter(settings.export_directory)
     ml_model_path = Path(__file__).parent / "ml" / "models" / "field_classifier.joblib"
     application.bot_data["ml_extractor"] = MLFieldExtractor(ml_model_path)
+    application.bot_data["llm_extractor"] = LLMFieldExtractor(
+        api_key=settings.openai_api_key,
+        model=settings.openai_model,
+    )
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("terminar", cmd_terminar))
