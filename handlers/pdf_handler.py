@@ -33,6 +33,21 @@ def _pdf_to_images(pdf_bytes: bytes) -> list[bytes]:
 async def handle_invoice_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     chat_id = update.effective_chat.id
+
+    # Verificación de empresa activa para aislamiento y seguridad
+    active_company = state_manager.get_active_company(chat_id)
+    settings = context.bot_data.get("settings") if context and hasattr(context, "bot_data") else None
+    if not active_company and not (settings and getattr(settings, "reporting_rnc", None)):
+        await message.reply_text(
+            "⚠️ *Acceso restringido: no has iniciado sesión en ninguna empresa.*\n\n"
+            "Para comenzar a declarar facturas en el 606, identifícate con tu empresa:\n"
+            "👉 `/login <RNC> <PIN>`\n\n"
+            "O si tu empresa es nueva en el sistema, regístrala con:\n"
+            "👉 `/registro <RNC> <PIN> <Nombre de la Empresa>`",
+            parse_mode="Markdown",
+        )
+        return
+
     if state_manager.get_session(chat_id).state != UserState.IDLE:
         await message.reply_text("Ya hay una factura en proceso. Confírmala, corrígela o usa /cancelar antes de enviar otra.")
         return
