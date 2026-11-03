@@ -18,6 +18,7 @@ from telegram.ext import (
 )
 
 from config import Settings, load_settings
+from dgii_txt import generate_606_txt
 from excel_exporter import Excel606Exporter
 from fiscal_validators import validate_invoice
 from handlers.confirmation_handler import (
@@ -47,7 +48,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     suffix = f" Tienes {count} factura(s) confirmada(s) en el lote actual." if count else ""
     await update.message.reply_text(
         "Envía una foto o PDF de factura. Confirmaré cada registro antes de añadirlo al lote 606."
-        f"{suffix} Escribe Terminar cuando quieras recibir el Excel."
+        f"{suffix} Escribe Terminar cuando quieras recibir el archivo TXT de la DGII."
     )
 
 
@@ -94,35 +95,43 @@ async def cmd_terminar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    exporter: Excel606Exporter = context.bot_data["excel_exporter"]
     settings: Settings = context.bot_data["settings"]
+    reporting_rnc = settings.reporting_rnc
+    if not reporting_rnc:
+        await update.message.reply_text(
+            "No se ha configurado el RNC declarante (DGII_REPORTING_RNC en .env). "
+            "Por favor configúralo para generar el archivo TXT oficial de la DGII."
+        )
+        return
+
     output_path: Path | None = None
     delivered = False
     try:
         output_path = await asyncio.to_thread(
-            exporter.export,
+            generate_606_txt,
             invoices,
-            chat_id=chat_id,
-            reporting_rnc=settings.reporting_rnc,
+            reporting_rnc=reporting_rnc,
+            output_dir=settings.export_directory,
         )
-        with output_path.open("rb") as workbook_file:
+        with output_path.open("rb") as txt_file:
             await update.message.reply_document(
-                document=InputFile(workbook_file, filename=output_path.name),
+                document=InputFile(txt_file, filename=output_path.name),
                 caption=(
-                    f"Formato 606 generado con {len(invoices)} factura(s). "
-                    "El archivo se elimina del servidor después de este envío."
+                    f"Archivo TXT del Formato 606 generado con {len(invoices)} factura(s).\n"
+                    f"RNC: {reporting_rnc} | Período: {output_path.stem.split('_')[-1]}\n"
+                    "Listo para importar directamente en la Oficina Virtual (OFV) de la DGII."
                 ),
             )
         delivered = True
     except Exception:
-        logger.exception("No fue posible exportar el lote", extra={"chat_id": chat_id})
-        await update.message.reply_text("No pude generar o enviar el Excel. El lote se conserva; intenta Terminar nuevamente.")
+        logger.exception("No fue posible exportar el lote en TXT", extra={"chat_id": chat_id})
+        await update.message.reply_text("No pude generar o enviar el archivo TXT 606. El lote se conserva; intenta Terminar nuevamente.")
     finally:
         if output_path:
             try:
                 output_path.unlink(missing_ok=True)
             except OSError:
-                logger.exception("No fue posible eliminar el Excel temporal", extra={"path": str(output_path)})
+                logger.exception("No fue posible eliminar el archivo TXT temporal", extra={"path": str(output_path)})
     if delivered:
         state_manager.clear_batch_and_session(chat_id)
 
@@ -139,7 +148,7 @@ async def route_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif state == UserState.WAITING_MANUAL_FIELD:
         await handle_manual_field_input(update, context)
     else:
-        await update.message.reply_text("Envía una foto o PDF, o escribe Terminar para exportar el lote confirmado.")
+        await update.message.reply_text("Envía una foto o PDF, o escribe Terminar para exportar el archivo TXT del lote.")
 
 
 def build_application() -> Application:

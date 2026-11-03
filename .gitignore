@@ -2,6 +2,9 @@
 env.txt
 credentials/
 data/
+exports/
+logs/
+*.log
 .venv/
 venv/
 env/
