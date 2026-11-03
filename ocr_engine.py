@@ -52,6 +52,7 @@ class OCRResult:
     fields: dict = field(default_factory=dict)
     missing_fields: list = field(default_factory=list)
     confidence: dict = field(default_factory=dict)  # field_name -> float
+    image_bytes: Optional[bytes] = None
 
 
 class InvoiceOCREngine:
@@ -63,10 +64,17 @@ class InvoiceOCREngine:
     testear cada capa de forma aislada sin llamar a las APIs reales.
     """
 
-    def __init__(self, credentials_path: str) -> None:
-        import os
-        os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", credentials_path)
-        self._client = vision.ImageAnnotatorClient()
+    def __init__(self, credentials_path: Optional[str] = None) -> None:
+        self.available = False
+        self._client = None
+        if credentials_path:
+            import os
+            os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", credentials_path)
+            try:
+                self._client = vision.ImageAnnotatorClient()
+                self.available = True
+            except Exception:
+                logger.warning("No fue posible inicializar Google Vision API", exc_info=True)
 
     # ------------------------------------------------------------------
     # Puntos de entrada públicos
@@ -82,9 +90,16 @@ class InvoiceOCREngine:
         except Exception:
             pass
 
-        processed = self._preprocess_image(image_bytes)
-        raw_text = self._detect_text(processed)
+        raw_text = ""
+        if self.available:
+            try:
+                processed = self._preprocess_image(image_bytes)
+                raw_text = self._detect_text(processed)
+            except Exception:
+                logger.warning("Error llamando a Google Vision API", exc_info=True)
+
         result = self._build_result(raw_text, image_bytes)
+        result.image_bytes = image_bytes
 
         # Si se detectó QR de la DGII, los campos del QR tienen prioridad máxima (confianza 1.0)
         if qr_fields:
@@ -159,7 +174,13 @@ class InvoiceOCREngine:
         combined_text = "\n\n--- PÁGINA SIGUIENTE ---\n\n".join(all_texts)
         missing = [f for f in REQUIRED_FIELDS if not merged.get(f)]
 
-        result = OCRResult(raw_text=combined_text, fields=merged, missing_fields=missing, confidence=merged_confs)
+        result = OCRResult(
+            raw_text=combined_text,
+            fields=merged,
+            missing_fields=missing,
+            confidence=merged_confs,
+            image_bytes=pages_bytes[-1] if pages_bytes else None,
+        )
 
         return result
 
@@ -314,6 +335,8 @@ class InvoiceOCREngine:
 
     def _detect_text(self, image_bytes: bytes) -> str:
         """Llama a document_text_detection, óptimo para documentos densos como facturas."""
+        if not self.available or not self._client:
+            return ""
         image = vision.Image(content=image_bytes)
         response = self._client.document_text_detection(
             image=image,

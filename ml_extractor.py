@@ -34,7 +34,7 @@ class MLFieldExtractor:
             return {}
             
         probabilities = self.model.predict_proba(features)
-        classes = self.model.classes_
+        classes = [str(c) for c in self.model.classes_]
         
         results = {}
         for i, token_data in enumerate(tokens):

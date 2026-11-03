@@ -1,4 +1,5 @@
 """Unit tests for MLFieldExtractor on Dominican invoice formats."""
+import random
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,9 @@ class TestMLExtractor(unittest.TestCase):
     def setUpClass(cls):
         model_path = Path(__file__).parent.parent / "ml" / "models" / "field_classifier.joblib"
         cls.extractor = MLFieldExtractor(model_path)
+
+    def setUp(self):
+        random.seed(42)
 
     def test_model_is_available(self):
         self.assertTrue(self.extractor.available, "ML model should be available and loaded")

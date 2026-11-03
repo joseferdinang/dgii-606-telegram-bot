@@ -25,9 +25,15 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # 1. Extractor LLM (OpenAI ChatGPT)
     llm_extractor = context.bot_data.get("llm_extractor") if context and hasattr(context, "bot_data") else None
-    if llm_extractor and llm_extractor.is_available and raw_text:
+    if llm_extractor and llm_extractor.is_available:
         try:
-            llm_extracted = await asyncio.to_thread(llm_extractor.extract_from_text, raw_text)
+            llm_extracted = {}
+            if raw_text.strip():
+                llm_extracted = await asyncio.to_thread(llm_extractor.extract_from_text, raw_text)
+            elif getattr(result, "image_bytes", None):
+                logger.info("Calling multimodal LLM extract_from_image for chat_id=%s", chat_id)
+                llm_extracted = await asyncio.to_thread(llm_extractor.extract_from_image, result.image_bytes)
+
             if llm_extracted:
                 logger.info("LLM extraction completed for chat_id=%s. Extracted fields: %s", chat_id, list(llm_extracted.keys()))
                 # Preservar campos que vinieron del código QR (confianza 1.0)
@@ -42,7 +48,7 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
                 # Re-aplicar QR para asegurar integridad absoluta
                 raw_fields.update(qr_fields)
         except Exception:
-            logger.exception("Error running LLM extractor on OCR text for chat_id=%s", chat_id)
+            logger.exception("Error running LLM extractor for chat_id=%s", chat_id)
 
     # 2. Extractor ML secundario (si está disponible y hay campos faltantes)
     ml_extractor = context.bot_data.get("ml_extractor") if context and hasattr(context, "bot_data") else None

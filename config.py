@@ -16,7 +16,7 @@ except ImportError:
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
-    google_vision_credentials_path: str
+    google_vision_credentials_path: str | None
     state_db_path: Path
     export_directory: Path
     reporting_rnc: str | None
@@ -27,25 +27,34 @@ class Settings:
 def load_settings() -> Settings:
     missing: list[str] = []
 
-    def required(name: str) -> str:
-        value = os.getenv(name, "").strip()
-        if not value:
-            missing.append(name)
-        return value
+    def get_var(name: str) -> str:
+        return os.getenv(name, "").strip()
 
-    token = required("TELEGRAM_BOT_TOKEN")
-    vision_credentials = required("GOOGLE_VISION_CREDENTIALS")
+    token = get_var("TELEGRAM_BOT_TOKEN")
+    if not token:
+        missing.append("TELEGRAM_BOT_TOKEN")
+
+    openai_key = get_var("OPENAI_API_KEY") or None
+    vision_credentials = get_var("GOOGLE_VISION_CREDENTIALS") or None
+
+    if not openai_key and not vision_credentials:
+        missing.append("OPENAI_API_KEY o GOOGLE_VISION_CREDENTIALS (se requiere al menos uno para procesar facturas)")
+
     if missing:
         raise ValueError(
             "Faltan variables obligatorias: " + ", ".join(missing) + ". "
             "Revise .env.example antes de iniciar el bot."
         )
 
-    credentials_file = Path(vision_credentials).expanduser()
-    if not credentials_file.is_file():
-        raise ValueError(
-            f"No existe el archivo configurado en GOOGLE_VISION_CREDENTIALS: {credentials_file}"
-        )
+    credentials_path: str | None = None
+    if vision_credentials:
+        credentials_file = Path(vision_credentials).expanduser()
+        if credentials_file.is_file():
+            credentials_path = str(credentials_file)
+        elif not openai_key:
+            raise ValueError(
+                f"No existe el archivo configurado en GOOGLE_VISION_CREDENTIALS: {credentials_file}"
+            )
 
     data_directory = Path(os.getenv("APP_DATA_DIR", "data")).expanduser()
     state_db_path = Path(os.getenv("STATE_DB_PATH", str(data_directory / "state" / "bot606.sqlite3"))).expanduser()
@@ -55,10 +64,10 @@ def load_settings() -> Settings:
 
     return Settings(
         telegram_bot_token=token,
-        google_vision_credentials_path=str(credentials_file),
+        google_vision_credentials_path=credentials_path,
         state_db_path=state_db_path,
         export_directory=export_directory,
         reporting_rnc=os.getenv("DGII_REPORTING_RNC", "").strip() or None,
-        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
+        openai_api_key=openai_key,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
     )
