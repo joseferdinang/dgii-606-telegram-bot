@@ -68,7 +68,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/empresa - Ver o cambiar tu empresa activa\n"
             "/logout - Cerrar sesión en esta empresa\n"
             "/estado - Ver estado del lote actual\n"
-            "/cancelar - Descartar factura en proceso",
+            "/cancelar - Descartar factura en proceso\n/reentrenar - Re-entrenar modelo ML con facturas reales",
             parse_mode="Markdown",
         )
     else:
@@ -182,6 +182,41 @@ async def cmd_terminar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         state_manager.clear_batch_and_session(chat_id, rnc=rnc_scope)
 
 
+
+async def cmd_reentrenar_ml(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from data_flywheel import get_sample_count, retrain_model_from_corpus
+    count = get_sample_count()
+    if count == 0:
+        await update.message.reply_text(
+            "🧠 *Aprendizaje Continuo ML*\n\n"
+            "Aún no hay facturas confirmadas en el corpus de aprendizaje.\n"
+            "A medida que subas y confirmes facturas (o corrijas datos), el modelo irá acumulando "
+            "conocimiento específico de tus facturas dominicanas.",
+            parse_mode="Markdown",
+        )
+        return
+
+    await update.message.reply_text(
+        f"🧠 Re-entrenando el modelo local con las {count} facturas confirmadas en el corpus...\n"
+        "Esto puede tardar unos segundos.",
+        parse_mode="Markdown",
+    )
+    ml_model_path = Path(__file__).parent / "ml" / "models" / "field_classifier.joblib"
+    res = await asyncio.to_thread(retrain_model_from_corpus, ml_model_path)
+    if res.get("status") == "success":
+        ml_ext = context.bot_data.get("ml_extractor")
+        if ml_ext:
+            ml_ext.reload(ml_model_path)
+        await update.message.reply_text(
+            f"✅ *¡Modelo re-entrenado y recargado con éxito!*\n\n"
+            f"📊 Muestras reales incorporadas: {res.get('real_samples')}\n"
+            f"🎯 Tokens procesados: {res.get('tokens')}\n\n"
+            "El extractor local ahora reconoce mejor los patrones de tus facturas.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(f"⚠️ No fue posible re-entrenar: {res.get('message', 'muestras insuficientes')}")
+
 async def route_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip().casefold()
     if text == "terminar":
@@ -229,6 +264,8 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("cancelar", cmd_cancelar))
     application.add_handler(CommandHandler("estado", cmd_estado))
     application.add_handler(CommandHandler("descartar_lote", cmd_descartar_lote))
+    application.add_handler(CommandHandler("reentrenar", cmd_reentrenar_ml))
+    application.add_handler(CommandHandler("reentrenar_ml", cmd_reentrenar_ml))
 
     # Comandos de autenticación y multi-empresa
     application.add_handler(CommandHandler("registro", cmd_registro))

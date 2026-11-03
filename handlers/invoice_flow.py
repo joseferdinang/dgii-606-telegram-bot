@@ -22,17 +22,26 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     raw_fields = dict(getattr(result, "fields", {}))
     raw_text = getattr(result, "raw_text", "")
+    image_bytes = getattr(result, "image_bytes", None)
 
     # 1. Extractor LLM (OpenAI ChatGPT)
     llm_extractor = context.bot_data.get("llm_extractor") if context and hasattr(context, "bot_data") else None
     if llm_extractor and llm_extractor.is_available:
         try:
             llm_extracted = {}
-            if raw_text.strip():
+            # Comprobar si QR o Vision ya obtuvieron todos los campos esenciales (RNC, NCF, Monto Total)
+            has_essential_fields = bool(raw_fields.get("rnc_cedula") and raw_fields.get("ncf") and raw_fields.get("monto_total"))
+
+            # Si NO hay texto de OCR, o si faltan campos esenciales pero disponemos de la imagen / página PDF:
+            # ¡Activamos el modelo de visión multimodal de GPT directamente sobre la imagen!
+            if (not raw_text.strip() or not has_essential_fields) and image_bytes:
+                logger.info("Activando inspección visual directa con GPT Multimodal para chat_id=%s", chat_id)
+                llm_extracted = await asyncio.to_thread(llm_extractor.extract_from_image, image_bytes)
+
+            # Si la inspección de imagen no se activó o no arrojó campos, pero sí hay texto de OCR:
+            if not llm_extracted and raw_text.strip():
+                logger.info("Extrayendo campos con GPT vía texto OCR para chat_id=%s", chat_id)
                 llm_extracted = await asyncio.to_thread(llm_extractor.extract_from_text, raw_text)
-            elif getattr(result, "image_bytes", None):
-                logger.info("Calling multimodal LLM extract_from_image for chat_id=%s", chat_id)
-                llm_extracted = await asyncio.to_thread(llm_extractor.extract_from_image, result.image_bytes)
 
             if llm_extracted:
                 logger.info("LLM extraction completed for chat_id=%s. Extracted fields: %s", chat_id, list(llm_extracted.keys()))

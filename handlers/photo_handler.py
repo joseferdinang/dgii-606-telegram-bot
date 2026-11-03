@@ -1,4 +1,4 @@
-"""Photo reception and asynchronous OCR execution."""
+"""Photo reception and asynchronous OCR / multimodal vision execution."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from handlers.invoice_flow import dispatch_ocr_result
-from ocr_engine import InvoiceOCREngine
+from ocr_engine import InvoiceOCREngine, OCRResult, REQUIRED_FIELDS
 from state_manager import UserState, state_manager
 
 logger = logging.getLogger(__name__)
@@ -39,14 +39,23 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
     state_manager.set_state(chat_id, UserState.PROCESSING_OCR)
     photo = message.photo[-1]
     await message.reply_text("Foto recibida. Analizando la factura.")
+    
+    image_bytes = None
     try:
         telegram_file = await context.bot.get_file(photo.file_id)
         image_bytes = bytes(await telegram_file.download_as_bytearray())
         engine: InvoiceOCREngine = context.bot_data["ocr_engine"]
         result = await asyncio.to_thread(engine.analyze, image_bytes)
     except Exception:
-        logger.exception("Error procesando foto", extra={"chat_id": chat_id})
-        state_manager.clear_session(chat_id)
-        await message.reply_text("No pude procesar la imagen. Envía una foto nítida de la factura e intenta de nuevo.")
-        return
+        logger.warning(
+            "Google Vision OCR no disponible o falló para chat_id=%s. Activando fallback directo a GPT Multimodal",
+            chat_id,
+            exc_info=True,
+        )
+        if not image_bytes:
+            state_manager.clear_session(chat_id)
+            await message.reply_text("No pude descargar la imagen de Telegram. Por favor intenta enviarla de nuevo.")
+            return
+        result = OCRResult(raw_text="", image_bytes=image_bytes, missing_fields=list(REQUIRED_FIELDS))
+
     await dispatch_ocr_result(update, context, result)

@@ -361,15 +361,24 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
 
         # Data Flywheel: Registrar muestra confirmada para aprendizaje continuo
         try:
-            from data_flywheel import record_training_sample
+            from data_flywheel import record_training_sample, get_sample_count, retrain_model_from_corpus
             record_training_sample(
                 session.extracted_data,
                 chat_id=chat_id,
                 was_corrected=was_corrected,
                 raw_text=raw_text,
             )
+            sample_count = get_sample_count()
+            if sample_count > 0 and sample_count % 5 == 0:
+                logger.info("Disparando re-entrenamiento automático de ML con %d muestras...", sample_count)
+                ml_model_path = Path(__file__).parent.parent / "ml" / "models" / "field_classifier.joblib"
+                retrain_res = retrain_model_from_corpus(ml_model_path)
+                if retrain_res.get("status") == "success":
+                    ml_ext = context.bot_data.get("ml_extractor") if context and hasattr(context, "bot_data") else None
+                    if ml_ext:
+                        ml_ext.reload(ml_model_path)
         except Exception:
-            logger.debug("Failed recording sample to data flywheel", exc_info=True)
+            logger.debug("Failed recording sample or retraining in data flywheel", exc_info=True)
             
     except DuplicateInvoiceError:
         await query.edit_message_text("Ese NCF ya se encuentra en el lote actual.")

@@ -179,7 +179,7 @@ class InvoiceOCREngine:
             fields=merged,
             missing_fields=missing,
             confidence=merged_confs,
-            image_bytes=pages_bytes[-1] if pages_bytes else None,
+            image_bytes=pages_bytes[0] if pages_bytes else None,
         )
 
         return result

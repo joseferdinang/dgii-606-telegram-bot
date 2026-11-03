@@ -1,4 +1,4 @@
-"""PDF reception, page rendering and asynchronous OCR execution."""
+"""PDF reception, page rendering and asynchronous OCR / multimodal vision execution."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from handlers.invoice_flow import dispatch_ocr_result
-from ocr_engine import InvoiceOCREngine
+from ocr_engine import InvoiceOCREngine, OCRResult, REQUIRED_FIELDS
 from state_manager import UserState, state_manager
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,8 @@ async def handle_invoice_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     state_manager.set_state(chat_id, UserState.PROCESSING_OCR)
     await message.reply_text("PDF recibido. Convirtiendo y analizando páginas.")
+    
+    pages = []
     try:
         telegram_file = await context.bot.get_file(document.file_id)
         pdf_bytes = bytes(await telegram_file.download_as_bytearray())
@@ -66,8 +68,16 @@ async def handle_invoice_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
         engine: InvoiceOCREngine = context.bot_data["ocr_engine"]
         result = await asyncio.to_thread(engine.analyze_pdf_pages, pages)
     except Exception:
-        logger.exception("Error procesando PDF", extra={"chat_id": chat_id})
-        state_manager.clear_session(chat_id)
-        await message.reply_text("No pude procesar el PDF. Verifica que no tenga contraseña y vuelve a intentarlo.")
-        return
+        logger.warning(
+            "Google Vision OCR falló o no disponible para PDF en chat_id=%s. Activando fallback directo a GPT Multimodal",
+            chat_id,
+            exc_info=True,
+        )
+        first_page = pages[0] if pages else None
+        if not first_page:
+            state_manager.clear_session(chat_id)
+            await message.reply_text("No pude procesar el archivo PDF. Asegúrate de que no esté dañado o protegido con contraseña.")
+            return
+        result = OCRResult(raw_text="", image_bytes=first_page, missing_fields=list(REQUIRED_FIELDS))
+
     await dispatch_ocr_result(update, context, result)

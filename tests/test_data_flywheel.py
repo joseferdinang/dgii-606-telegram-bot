@@ -1,11 +1,16 @@
-"""Unit tests for Data Flywheel."""
+"""Unit tests for Data Flywheel and Continuous Active Learning."""
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from data_flywheel import record_training_sample
+from data_flywheel import (
+    get_sample_count,
+    load_training_corpus,
+    record_training_sample,
+    retrain_model_from_corpus,
+)
 
 
 class TestDataFlywheel(unittest.TestCase):
@@ -47,6 +52,36 @@ class TestDataFlywheel(unittest.TestCase):
                 self.assertEqual(sample["monto_total"], "3646.28")
                 self.assertEqual(sample["tipo_bienes_servicios"], "04")
                 self.assertIn("GASOIL OPTIMO", sample["raw_text"])
+
+    def test_sample_count_and_retrain(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_corpus = Path(tmpdir) / "confirmed_samples.jsonl"
+            test_model = Path(tmpdir) / "test_model.joblib"
+            with patch("data_flywheel.SAMPLES_FILE", test_corpus), \
+                 patch("data_flywheel.CORPUS_DIR", Path(tmpdir)):
+                
+                self.assertEqual(get_sample_count(), 0)
+                invoice_data = {
+                    "rnc_cedula": "101068744",
+                    "ncf": "E310000084920",
+                    "fecha_comprobante": "20260924",
+                    "monto_total": "3646.28",
+                    "itbis_facturado": "0.00",
+                }
+                record_training_sample(
+                    invoice_data,
+                    chat_id=1,
+                    was_corrected=False,
+                    raw_text="TOTAL RNC 101068744 NCF E310000084920 TOTAL 3646.28",
+                )
+                self.assertEqual(get_sample_count(), 1)
+                self.assertEqual(len(load_training_corpus()), 1)
+                
+                # Test retraining with this real sample
+                res = retrain_model_from_corpus(model_path=test_model, min_samples=1)
+                self.assertEqual(res["status"], "success")
+                self.assertEqual(res["real_samples"], 1)
+                self.assertTrue(test_model.exists())
 
 
 if __name__ == "__main__":
