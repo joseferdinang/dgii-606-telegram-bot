@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-CORPUS_DIR = Path("data/training_corpus")
+CORPUS_DIR = Path(os.getenv("APP_DATA_DIR", "data")) / "training_corpus"
 SAMPLES_FILE = CORPUS_DIR / "confirmed_samples.jsonl"
 _RETRAIN_LOCK = threading.Lock()
 _LAST_RETRAIN_TIME = 0.0

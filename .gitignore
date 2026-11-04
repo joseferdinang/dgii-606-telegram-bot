@@ -1,6 +1,7 @@
 .env
 env.txt
-credentials/
+credentials/*.json
+credentials/*.key
 data/
 exports/
 logs/
