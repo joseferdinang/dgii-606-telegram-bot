@@ -1,4 +1,4 @@
-"""Photo reception and asynchronous OCR / multimodal vision execution."""
+"""Photo reception and asynchronous OCR / multimodal vision execution with batch queue support."""
 
 from __future__ import annotations
 
@@ -33,19 +33,35 @@ async def handle_invoice_photo(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    if state_manager.get_session(chat_id).state != UserState.IDLE:
-        await message.reply_text("Ya hay una factura en proceso. Confírmala, corrígela o usa /cancelar antes de enviar otra.")
-        return
-    state_manager.set_state(chat_id, UserState.PROCESSING_OCR)
     photo = message.photo[-1]
-    await message.reply_text("Foto recibida. Analizando la factura.")
+    file_id = photo.file_id
+    rnc_scope = active_company.rnc if active_company else None
+
+    # Si ya hay una factura en revisión o procesándose, encolamos esta imagen
+    if state_manager.get_session(chat_id).state != UserState.IDLE:
+        count = state_manager.enqueue_media(
+            chat_id,
+            file_id,
+            "photo",
+            media_group_id=message.media_group_id,
+            rnc=rnc_scope,
+        )
+        await message.reply_text(
+            f"📥 Foto añadida a la cola (Facturas en espera: {count}).\n"
+            "Se procesará automáticamente en cuanto confirmes o descartes la factura actual."
+        )
+        return
+
+    state_manager.set_state(chat_id, UserState.PROCESSING_OCR)
+    await message.reply_text("Foto recibida. Analizando la factura...")
     
     image_bytes = None
     try:
-        telegram_file = await context.bot.get_file(photo.file_id)
+        telegram_file = await context.bot.get_file(file_id)
         image_bytes = bytes(await telegram_file.download_as_bytearray())
         engine: InvoiceOCREngine = context.bot_data["ocr_engine"]
-        result = await asyncio.to_thread(engine.analyze, image_bytes)
+        buyer_rnc = active_company.rnc if active_company else None
+        result = await asyncio.to_thread(engine.analyze, image_bytes, buyer_rnc=buyer_rnc)
     except Exception:
         logger.warning(
             "Google Vision OCR no disponible o falló para chat_id=%s. Activando fallback directo a GPT Multimodal",

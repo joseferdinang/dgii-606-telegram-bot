@@ -163,7 +163,7 @@ class LLMFieldExtractor:
         if self.api_key:
             try:
                 from openai import OpenAI
-                self._client = OpenAI(api_key=self.api_key)
+                self._client = OpenAI(api_key=self.api_key, timeout=60.0, max_retries=2)
                 logger.info("OpenAI LLMFieldExtractor initialized successfully with model %s", self.model)
             except Exception:
                 logger.exception("Failed to initialize OpenAI client")
@@ -174,7 +174,7 @@ class LLMFieldExtractor:
     def is_available(self) -> bool:
         return self._client is not None
 
-    def extract_from_text(self, raw_text: str) -> Dict[str, Any]:
+    def extract_from_text(self, raw_text: str, buyer_rnc: Optional[str] = None) -> Dict[str, Any]:
         """Extracts structured invoice fields from OCR raw text."""
         if not self.is_available or not raw_text.strip():
             return {}
@@ -186,7 +186,10 @@ class LLMFieldExtractor:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {
                         "role": "user",
-                        "content": f"Extrae los campos fiscales de esta factura según el Formato 606:\n\n{raw_text}",
+                        "content": (
+                            f"Extrae los campos fiscales de esta factura según el Formato 606:\n\n{raw_text}"
+                            + (f"\n\nATENCIÓN: El RNC de la empresa declarante (compradora) es {buyer_rnc}. NO extraigas este RNC; debes extraer exclusivamente el RNC del proveedor o emisor que vendió." if buyer_rnc else "")
+                        ),
                     },
                 ],
                 response_format={
@@ -208,7 +211,7 @@ class LLMFieldExtractor:
             logger.exception("Error extracting invoice fields via OpenAI API")
             return {}
 
-    def extract_from_image(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> Dict[str, Any]:
+    def extract_from_image(self, image_bytes: bytes, mime_type: str = "image/jpeg", buyer_rnc: Optional[str] = None) -> Dict[str, Any]:
         """Extracts fields directly from invoice image using multimodal vision."""
         if not self.is_available or not image_bytes:
             return {}
@@ -224,7 +227,13 @@ class LLMFieldExtractor:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Extrae los campos fiscales de esta imagen de factura para la DGII 606:"},
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Extrae los campos fiscales de esta imagen de factura para la DGII 606:"
+                                    + (f"\nATENCIÓN: El RNC de la empresa declarante (compradora) es {buyer_rnc}. NO extraigas este RNC como proveedor; extrae el del emisor/vendedor." if buyer_rnc else "")
+                                ),
+                            },
                             {"type": "image_url", "image_url": {"url": image_url}},
                         ],
                     },

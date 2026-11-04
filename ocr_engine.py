@@ -19,8 +19,15 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from google.cloud import vision
-from PIL import Image, ImageEnhance, ImageFilter
+try:
+    from google.cloud import vision
+except ImportError:
+    vision = None
+
+try:
+    from PIL import Image, ImageEnhance, ImageFilter
+except ImportError:
+    Image = ImageEnhance = ImageFilter = None
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +87,7 @@ class InvoiceOCREngine:
     # Puntos de entrada públicos
     # ------------------------------------------------------------------
 
-    def analyze(self, image_bytes: bytes) -> OCRResult:
+    def analyze(self, image_bytes: bytes, buyer_rnc: Optional[str] = None) -> OCRResult:
         """Punto de entrada para imágenes (JPEG/PNG). bytes → OCRResult estructurado."""
         # 1. Intentar decodificar código QR de factura electrónica DGII (e-CF)
         qr_fields = None
@@ -98,7 +105,7 @@ class InvoiceOCREngine:
             except Exception:
                 logger.warning("Error llamando a Google Vision API", exc_info=True)
 
-        result = self._build_result(raw_text, image_bytes)
+        result = self._build_result(raw_text, image_bytes, buyer_rnc=buyer_rnc)
         result.image_bytes = image_bytes
 
         # Si se detectó QR de la DGII, los campos del QR tienen prioridad máxima (confianza 1.0)
@@ -112,19 +119,31 @@ class InvoiceOCREngine:
 
         return result
 
-    def analyze_pdf_pages(self, pages_bytes: list[bytes]) -> OCRResult:
+    def analyze_pdf_pages(self, pages_bytes: list[bytes], buyer_rnc: Optional[str] = None) -> OCRResult:
         """
         Punto de entrada para PDFs multi-página.
 
         Estrategia de consolidación:
-          - RNC/NCF/Fecha: se toman de la primera página que los detecte
-            (suelen estar en el encabezado).
-          - Monto/ITBIS: se toman de la última página que los detecte
-            (suelen estar en el pie/totales).
+          - Escaneo de código QR de e-CF en todas las páginas (prioridad 1.0).
+          - RNC/NCF/Fecha: se toman de la primera página que los detecte (encabezado).
+          - Monto/ITBIS: se toman de la última página que los detecte (totales).
+          - Fallback visual: si faltan totales se envía la última página; si faltan datos de emisor, la primera.
         Retorna un único OCRResult consolidado.
         """
         if not pages_bytes:
             return OCRResult(raw_text="", missing_fields=list(REQUIRED_FIELDS))
+
+        # 1. Escanear cada página del PDF en busca de código QR oficial de la DGII
+        qr_fields = None
+        try:
+            from qr_reader import extract_qr_from_image_bytes
+            for p_bytes in pages_bytes:
+                _, p_qr = extract_qr_from_image_bytes(p_bytes)
+                if p_qr:
+                    qr_fields = p_qr
+                    break
+        except Exception:
+            pass
 
         all_texts: list[str] = []
         all_fields: list[dict] = []
@@ -134,7 +153,7 @@ class InvoiceOCREngine:
             try:
                 processed = self._preprocess_image(page_bytes)
                 page_text = self._detect_text(processed)
-                page_fields, page_confs = self._parse_fields(page_text)
+                page_fields, page_confs = self._parse_fields(page_text, buyer_rnc=buyer_rnc)
                 all_texts.append(page_text)
                 all_fields.append(page_fields)
                 all_confidences.append(page_confs)
@@ -171,20 +190,32 @@ class InvoiceOCREngine:
                         merged_confs[f] = all_confidences[real_idx][f]
                     break
 
+        # Si se detectó QR en alguna página del PDF, sus campos tienen prioridad máxima (1.0)
+        if qr_fields:
+            for k, v in qr_fields.items():
+                if v:
+                    merged[k] = v
+                    merged_confs[k] = 1.0
+            logger.info("Campos QR DGII aplicados con éxito desde PDF: %s", list(qr_fields.keys()))
+
         combined_text = "\n\n--- PÁGINA SIGUIENTE ---\n\n".join(all_texts)
         missing = [f for f in REQUIRED_FIELDS if not merged.get(f)]
+
+        # Seleccionar la mejor página para fallback visual: si faltan montos, la última página; si no, la primera
+        target_idx = -1 if ("monto_total" in missing or "itbis_facturado" in missing) else 0
+        selected_image = pages_bytes[target_idx] if pages_bytes else None
 
         result = OCRResult(
             raw_text=combined_text,
             fields=merged,
             missing_fields=missing,
             confidence=merged_confs,
-            image_bytes=pages_bytes[0] if pages_bytes else None,
+            image_bytes=selected_image,
         )
 
         return result
 
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
     # Preprocesamiento de imagen
     # ------------------------------------------------------------------
 
@@ -268,6 +299,9 @@ class InvoiceOCREngine:
         # 0. Aplanado de perspectiva para recibos en ángulo
         image_bytes = self._correct_perspective_cv2(image_bytes)
 
+        if Image is None:
+            return image_bytes
+
         try:
             img = Image.open(io.BytesIO(image_bytes))
             w, h = img.size
@@ -350,9 +384,9 @@ class InvoiceOCREngine:
     # Construcción del resultado
     # ------------------------------------------------------------------
 
-    def _build_result(self, raw_text: str, original_bytes: bytes) -> OCRResult:
-        """Parsea el texto, aplica fallback Gemini si hace falta."""
-        fields, confidences = self._parse_fields(raw_text)
+    def _build_result(self, raw_text: str, original_bytes: bytes, buyer_rnc: Optional[str] = None) -> OCRResult:
+        """Parsea el texto crudo y extrae campos fiscales normalizados."""
+        fields, confidences = self._parse_fields(raw_text, buyer_rnc=buyer_rnc)
         missing = [f for f in REQUIRED_FIELDS if not fields.get(f)]
         result = OCRResult(raw_text=raw_text, fields=fields, missing_fields=missing, confidence=confidences)
 
@@ -362,7 +396,7 @@ class InvoiceOCREngine:
     # Parseo de campos con regex
     # ------------------------------------------------------------------
 
-    def _parse_fields(self, text: str) -> tuple[dict, dict]:
+    def _parse_fields(self, text: str, buyer_rnc: Optional[str] = None) -> tuple[dict, dict]:
         """
         Extrae campos mediante regex ajustados a formatos fiscales dominicanos.
         Los patrones son tolerantes a variaciones de OCR (espacios extra,
@@ -372,7 +406,7 @@ class InvoiceOCREngine:
         """
         result: dict[str, Optional[FieldConfidence]] = {}
 
-        result["rnc_cedula"] = self._extract_rnc_cedula(text)
+        result["rnc_cedula"] = self._extract_rnc_cedula(text, buyer_rnc=buyer_rnc)
         result["ncf"] = self._extract_ncf(text)
         result["fecha_comprobante"] = self._extract_fecha(text)
         result["monto_total"] = self._extract_monto(text)
@@ -388,33 +422,76 @@ class InvoiceOCREngine:
         conf_dict = {k: v.confidence for k, v in result.items() if v is not None}
         return fields_dict, conf_dict
 
-    @staticmethod
-    def _extract_rnc_cedula(text: str) -> Optional[FieldConfidence]:
+    @classmethod
+    def _extract_rnc_cedula(cls, text: str, buyer_rnc: Optional[str] = None) -> Optional[FieldConfidence]:
         """
-        RNC (9 dígitos): formato corrido o con guiones 3-5-1.
-        Cédula (11 dígitos): formato corrido o con guiones 3-7-1.
+        Extrae el RNC (9 dígitos) o Cédula (11 dígitos) del emisor/proveedor.
+        Excluye números asignados a etiquetas de cliente/comprador y descarta
+        el RNC de la empresa declarante (buyer_rnc).
+        Verifica el dígito verificador oficial DGII para priorizar RNCs legítimos.
+        """
+        from fiscal_validators import validate_identifier_check_digit
 
-        Intenta primero con etiqueta (más confiable) y luego sin etiqueta
-        (fallback para facturas que no la declaran explícitamente).
-        También valida que la longitud sea correcta después de quitar guiones.
-        """
-        # Con etiqueta
-        match = re.search(
-            r"(?:RNC|C[EÉ]DULA|TAX\s*ID|NIF)\s*[:.#\-]?\s*"
-            r"([\d]{3}[\-\s]?[\d]{5,7}[\-\s]?[\d]{1})",
+        clean_buyer = re.sub(r"\D", "", buyer_rnc or "") if buyer_rnc else None
+
+        candidates = []
+
+        # 1. Candidatos con etiqueta explícita
+        for m in re.finditer(
+            r"(?:RNC|C[EÉ]DULA|TAX\s*ID|NIF)\s*[:.#\-]?\s*([\d]{3}[\-\s]?[\d]{5,7}[\-\s]?[\d]{1})",
             text,
             re.IGNORECASE,
-        )
-        if match:
-            digits = re.sub(r"\D", "", match.group(1))
+        ):
+            digits = re.sub(r"\D", "", m.group(1))
             if len(digits) in (9, 11):
-                return FieldConfidence(value=digits, confidence=0.9, source="labeled")
+                prefix = text[max(0, m.start() - 40):m.start()].upper()
+                is_client = bool(re.search(r"(?:CLIENTE|COMPRADOR|RECEPTOR|FACTURAD[OA]\s*A|CONSIGNEE|CUSTOMER)", prefix))
+                is_vendor = bool(re.search(r"(?:EMISOR|PROVEEDOR|VENDEDOR|SUPLIDOR)", prefix))
+                candidates.append((digits, True, is_client, is_vendor, m.start()))
 
-        # Sin etiqueta: número solo que calce exactamente como RNC o cédula
+        # 2. Candidatos por formato numérico directo (3-5-1 o 3-7-1 o 9/11 dígitos continuos)
         for m in re.finditer(r"\b(\d{3}-\d{5}-\d|\d{3}-\d{7}-\d|\d{9}|\d{11})\b", text):
             digits = re.sub(r"\D", "", m.group(1))
             if len(digits) in (9, 11):
-                return FieldConfidence(value=digits, confidence=0.6, source="pattern")
+                if not any(c[0] == digits and abs(c[4] - m.start()) < 20 for c in candidates):
+                    prefix = text[max(0, m.start() - 30):m.start()].upper()
+                    if re.search(r"(?:TEL|TEL[EÉ]FONO|CEL|WHATSAPP|PEDIDO|ORDEN|NCF|FACTURA)\s*[:.#\-]?\s*$", prefix):
+                        continue
+                    is_client = bool(re.search(r"(?:CLIENTE|COMPRADOR|RECEPTOR)", prefix))
+                    candidates.append((digits, False, is_client, False, m.start()))
+
+        if not candidates:
+            return None
+
+        scored = []
+        for digits, labeled, is_client, is_vendor, pos in candidates:
+            score = 0.5
+            if labeled:
+                score += 0.3
+            if is_vendor:
+                score += 0.2
+            if is_client:
+                score -= 0.6
+            if clean_buyer and digits == clean_buyer:
+                score -= 0.9
+
+            has_valid_chk = validate_identifier_check_digit(digits)
+            if has_valid_chk:
+                score += 0.3
+            else:
+                score -= 0.1
+
+            if pos < len(text) * 0.35:
+                score += 0.1
+
+            scored.append((score, digits, labeled, has_valid_chk))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_digits, best_labeled, best_chk = scored[0]
+
+        if best_score > 0.2 or (clean_buyer and best_digits != clean_buyer):
+            confidence = min(0.95 if (best_labeled and best_chk) else (0.85 if best_chk else (0.7 if best_labeled else 0.5)), 1.0)
+            return FieldConfidence(value=best_digits, confidence=confidence, source="labeled" if best_labeled else "pattern")
 
         return None
 

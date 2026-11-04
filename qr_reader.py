@@ -16,9 +16,20 @@ import re
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-import cv2
-import numpy as np
-from PIL import Image
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +148,9 @@ def extract_qr_from_image_bytes(image_bytes: bytes) -> Tuple[Optional[str], Opti
     Decodes QR code from raw image bytes and parses any DGII e-CF payload.
     Returns (raw_qr_text, dgii_fields_dict).
     """
+    if cv2 is None or np is None:
+        logger.debug("OpenCV or NumPy not available for image QR detection")
+        return None, None
     try:
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)

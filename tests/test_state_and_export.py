@@ -4,7 +4,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from openpyxl import load_workbook
+try:
+    from openpyxl import load_workbook
+except ImportError:
+    load_workbook = None
 
 from excel_exporter import Excel606Exporter, HEADERS
 from state_manager import StateManager, UserState
@@ -37,6 +40,7 @@ class StateAndExportTests(unittest.TestCase):
             self.assertEqual(restarted.batch_count(42), 1)
             self.assertTrue(restarted.has_invoice(42, valid_invoice()))
 
+    @unittest.skipIf(load_workbook is None, "openpyxl not installed")
     def test_export_uses_all_26_dgii_columns(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             exporter = Excel606Exporter(Path(directory))

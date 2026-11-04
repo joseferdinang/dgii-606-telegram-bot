@@ -43,12 +43,51 @@ def _clean_digits(value: Any) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
 
-def normalize_identifier(value: Any) -> str:
+def validate_rnc_check_digit(rnc: Any) -> bool:
+    """Valida el dígito verificador de un RNC (9 dígitos) según el algoritmo oficial Módulo 11 de la DGII."""
+    digits = _clean_digits(rnc)
+    if not RNC_PATTERN.fullmatch(digits):
+        return False
+    weights = [7, 9, 8, 6, 5, 4, 3, 2]
+    total = sum(int(d) * w for d, w in zip(digits[:8], weights))
+    remainder = total % 11
+    expected = 2 if remainder == 0 else (1 if remainder == 1 else 11 - remainder)
+    return expected == int(digits[8])
+
+
+def validate_cedula_check_digit(cedula: Any) -> bool:
+    """Valida el dígito verificador de una Cédula (11 dígitos) según el algoritmo oficial Módulo 10 (Luhn)."""
+    digits = _clean_digits(cedula)
+    if not CEDULA_PATTERN.fullmatch(digits):
+        return False
+    multipliers = [1, 2, 1, 2, 1, 2, 1, 2, 1, 2]
+    total = 0
+    for d, m in zip(digits[:10], multipliers):
+        prod = int(d) * m
+        total += (prod // 10) + (prod % 10) if prod > 9 else prod
+    expected = (10 - (total % 10)) % 10
+    return expected == int(digits[10])
+
+
+def validate_identifier_check_digit(value: Any) -> bool:
+    """Valida el dígito verificador para un RNC (9 dígitos) o Cédula (11 dígitos)."""
+    digits = _clean_digits(value)
+    if len(digits) == 9:
+        return validate_rnc_check_digit(digits)
+    if len(digits) == 11:
+        return validate_cedula_check_digit(digits)
+    return False
+
+
+def normalize_identifier(value: Any, *, validate_check_digit: bool = False) -> str:
     """Return a nine-digit RNC or eleven-digit cedula, or raise ValueError."""
     digits = _clean_digits(value)
-    if RNC_PATTERN.fullmatch(digits) or CEDULA_PATTERN.fullmatch(digits):
-        return digits
-    raise ValueError("El RNC debe tener 9 dígitos o la cédula 11 dígitos.")
+    if not (RNC_PATTERN.fullmatch(digits) or CEDULA_PATTERN.fullmatch(digits)):
+        raise ValueError("El RNC debe tener 9 dígitos o la cédula 11 dígitos.")
+    if validate_check_digit and not validate_identifier_check_digit(digits):
+        doc_type = "El RNC" if len(digits) == 9 else "La cédula"
+        raise ValueError(f"{doc_type} no tiene un dígito verificador válido.")
+    return digits
 
 
 def infer_tipo_id(rnc_cedula: Any) -> str:
@@ -154,7 +193,7 @@ def normalize_extracted_fields(fields: dict[str, Any]) -> tuple[dict[str, Any], 
     return normalized, invalid
 
 
-def validate_invoice(data: dict[str, Any]) -> list[ValidationIssue]:
+def validate_invoice(data: dict[str, Any], *, strict_check_digit: bool = False) -> list[ValidationIssue]:
     """Return every locally verifiable blocking issue for an exportable 606 row."""
     issues: list[ValidationIssue] = []
 
@@ -166,6 +205,9 @@ def validate_invoice(data: dict[str, Any]) -> list[ValidationIssue]:
             return None
 
     identifier = require_normalized("rnc_cedula", normalize_identifier, "RNC/Cédula inválido")
+    if identifier and strict_check_digit and not validate_identifier_check_digit(identifier):
+        doc_type = "RNC" if len(identifier) == 9 else "Cédula"
+        issues.append(ValidationIssue("rnc_cedula", f"El {doc_type} no supera la validación de dígito verificador oficial DGII."))
     ncf = require_normalized("ncf", normalize_ncf, "NCF inválido")
     invoice_date = require_normalized("fecha_comprobante", as_date, "Fecha de comprobante inválida")
     payment_date: date | None = None

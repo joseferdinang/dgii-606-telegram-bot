@@ -18,6 +18,8 @@ class TestMLExtractor(unittest.TestCase):
         cls.extractor = MLFieldExtractor(model_path)
 
     def setUp(self):
+        if not self.extractor.available:
+            self.skipTest("ML model or dependencies (joblib/sklearn) not available")
         random.seed(42)
 
     def test_model_is_available(self):

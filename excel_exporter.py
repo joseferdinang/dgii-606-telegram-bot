@@ -7,9 +7,15 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.worksheet.table import Table, TableStyleInfo
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+except ImportError:
+    Workbook = Alignment = Border = Font = PatternFill = Side = None
+try:
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+except ImportError:
+    Table = TableStyleInfo = None
 
 from fiscal_validators import decimal_text, infer_tipo_id, normalize_amount, normalize_date
 

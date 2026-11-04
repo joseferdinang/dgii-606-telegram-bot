@@ -2,7 +2,10 @@ import unittest
 import os
 import tempfile
 from decimal import Decimal
-import openpyxl
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 from pathlib import Path
 
 from fiscal_validators import validate_invoice, ValidationIssue, normalize_amount
@@ -253,6 +256,7 @@ class TestErrorScenarios(unittest.TestCase):
             with self.assertRaises(ValueError):
                 exporter.export([], chat_id=1, reporting_rnc="131000001")
 
+    @unittest.skipIf(openpyxl is None, "openpyxl not installed")
     def test_export_produces_26_columns(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             exporter = Excel606Exporter(Path(tmpdir))
@@ -261,12 +265,14 @@ class TestErrorScenarios(unittest.TestCase):
             ws = wb.active
             self.assertGreaterEqual(ws.max_column, 23)
 
+    @unittest.skipIf(openpyxl is None, "openpyxl not installed")
     def test_export_date_split_correctly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             exporter = Excel606Exporter(Path(tmpdir))
             export_path = exporter.export([valid_invoice()], chat_id=1, reporting_rnc="131000001")
             self.assertTrue(os.path.exists(export_path))
 
+    @unittest.skipIf(openpyxl is None, "openpyxl not installed")
     def test_export_instructions_sheet_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             exporter = Excel606Exporter(Path(tmpdir))
@@ -274,12 +280,14 @@ class TestErrorScenarios(unittest.TestCase):
             wb = openpyxl.load_workbook(export_path)
             self.assertIn("Instrucciones", wb.sheetnames)
 
+    @unittest.skipIf(openpyxl is None, "openpyxl not installed")
     def test_export_total_calculation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             exporter = Excel606Exporter(Path(tmpdir))
             export_path = exporter.export([valid_invoice()], chat_id=1, reporting_rnc="131000001")
             self.assertTrue(os.path.exists(export_path))
 
+    @unittest.skipIf(openpyxl is None, "openpyxl not installed")
     def test_export_file_created_and_valid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             exporter = Excel606Exporter(Path(tmpdir))

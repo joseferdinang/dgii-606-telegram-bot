@@ -274,10 +274,12 @@ async def handle_manual_field_input(update: Update, context: ContextTypes.DEFAUL
 async def proceed_to_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     session = state_manager.get_session(chat_id)
+    active_company = state_manager.get_active_company(chat_id)
+    comp_rnc = active_company.rnc if active_company else ""
     
     rnc = session.extracted_data.get("rnc_cedula")
     if rnc and not session.extracted_data.get("tipo_bienes_servicios"):
-        memory = state_manager.get_supplier_memory(rnc)
+        memory = state_manager.get_supplier_memory(rnc, company_rnc=comp_rnc)
         if memory:
             session.extracted_data["tipo_bienes_servicios"] = memory.get("tipo_bienes_servicios")
             session.extracted_data["forma_pago"] = memory.get("forma_pago")
@@ -324,6 +326,9 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
     session = state_manager.get_session(chat_id)
 
     if query.data == "correct_invoice":
+        if session.state != UserState.WAITING_CONFIRMATION:
+            await query.answer("Esta confirmación ya no está activa.", show_alert=True)
+            return
         for field in ("monto_servicios", "monto_bienes"):
             session.extracted_data.pop(field, None)
         session.extracted_data["_was_corrected"] = True
@@ -350,35 +355,47 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
         raw_text = session.extracted_data.pop("_raw_text", None)
         was_corrected = session.extracted_data.pop("_was_corrected", False)
 
-        state_manager.add_confirmed_invoice(chat_id, session.extracted_data)
+        active_company = state_manager.get_active_company(chat_id)
+        comp_rnc = active_company.rnc if active_company else None
+
+        state_manager.add_confirmed_invoice(chat_id, session.extracted_data, rnc=comp_rnc)
         
-        # Guardar memoria del proveedor (RNC -> Categoria y Forma de Pago)
+        # Guardar memoria del proveedor (RNC -> Categoria y Forma de Pago) aislada por empresa
         rnc = session.extracted_data.get("rnc_cedula")
         cat = session.extracted_data.get("tipo_bienes_servicios")
         fp = session.extracted_data.get("forma_pago")
         if rnc and cat and fp:
-            state_manager.save_supplier_memory(rnc, cat, fp)
+            state_manager.save_supplier_memory(rnc, cat, fp, company_rnc=comp_rnc or "")
 
-        # Data Flywheel: Registrar muestra confirmada para aprendizaje continuo
+        # Data Flywheel: Registrar muestra confirmada para aprendizaje continuo y re-entrenamiento
         try:
-            from data_flywheel import record_training_sample, get_sample_count, retrain_model_from_corpus
+            from data_flywheel import record_training_sample, retrain_model_from_corpus
+            from pathlib import Path
+            import asyncio
+
             record_training_sample(
                 session.extracted_data,
                 chat_id=chat_id,
                 was_corrected=was_corrected,
                 raw_text=raw_text,
             )
-            sample_count = get_sample_count()
-            if sample_count > 0 and sample_count % 5 == 0:
-                logger.info("Disparando re-entrenamiento automático de ML con %d muestras...", sample_count)
-                ml_model_path = Path(__file__).parent.parent / "ml" / "models" / "field_classifier.joblib"
-                retrain_res = retrain_model_from_corpus(ml_model_path)
-                if retrain_res.get("status") == "success":
-                    ml_ext = context.bot_data.get("ml_extractor") if context and hasattr(context, "bot_data") else None
-                    if ml_ext:
-                        ml_ext.reload(ml_model_path)
+
+            # Re-entrenamiento automático continuo en segundo plano en cada factura subida
+            ml_model_path = Path(__file__).parent.parent / "ml" / "models" / "field_classifier.joblib"
+            async def _bg_retrain():
+                try:
+                    retrain_res = await asyncio.to_thread(retrain_model_from_corpus, ml_model_path, min_samples=1)
+                    if retrain_res.get("status") == "success":
+                        ml_ext = context.bot_data.get("ml_extractor") if context and hasattr(context, "bot_data") else None
+                        if ml_ext:
+                            ml_ext.reload(ml_model_path)
+                        logger.info("Modelo ML re-entrenado y recargado con éxito en memoria.")
+                except Exception:
+                    logger.debug("Error en re-entrenamiento ML de fondo", exc_info=True)
+
+            asyncio.create_task(_bg_retrain())
         except Exception:
-            logger.debug("Failed recording sample or retraining in data flywheel", exc_info=True)
+            logger.debug("Failed recording sample or triggering retraining", exc_info=True)
             
     except DuplicateInvoiceError:
         await query.edit_message_text("Ese NCF ya se encuentra en el lote actual.")
@@ -389,8 +406,21 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
         await query.edit_message_text("No pude guardar la factura. El lote no fue modificado; intenta confirmar de nuevo.")
         return
 
-    count = state_manager.batch_count(chat_id)
+    count = state_manager.batch_count(chat_id, rnc=comp_rnc)
     state_manager.clear_session(chat_id)
-    await query.edit_message_text(
-        f"Factura añadida al lote. El lote tiene {count} factura(s). Envía otra factura o escribe Terminar para exportar."
-    )
+
+    # Procesar automáticamente la siguiente factura en cola si existe
+    from handlers.queue_handler import process_next_queued_media
+    has_next = await process_next_queued_media(update, context)
+
+    if not has_next:
+        await query.edit_message_text(
+            f"✅ Factura añadida al lote (Lote: {count} facturas).\n"
+            f"🧠 El modelo ML local ha aprendido de esta factura para futuras extracciones.\n\n"
+            "Envía otra factura o escribe Terminar para exportar."
+        )
+    else:
+        await query.edit_message_text(
+            f"✅ Factura añadida al lote (Lote: {count} facturas).\n"
+            f"🧠 Modelo ML actualizado. Pasando a la siguiente factura en cola..."
+        )

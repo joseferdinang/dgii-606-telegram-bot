@@ -11,7 +11,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from state_manager import state_manager
+from state_manager import UserState, state_manager
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,11 @@ async def cmd_registro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     razon_social = " ".join(args[2:]).strip()
 
     try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    try:
         company = state_manager.register_company(
             chat_id=chat_id,
             rnc=rnc,
@@ -53,7 +58,7 @@ async def cmd_registro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"✅ *¡Empresa registrada y activada con éxito!*\n\n"
             f"🏢 *Empresa:* {company.razon_social}\n"
             f"🆔 *RNC:* `{company.rnc}`\n"
-            f"🔒 *PIN de acceso:* `{pin}` *(guárdalo para autorizar a tu equipo)*\n\n"
+            f"🔒 *PIN de acceso configurado correctamente.* *(Guárdalo de forma segura para autorizar a tu equipo)*\n\n"
             "Todas las facturas que envíes ahora se registrarán para esta empresa.\n"
             "Escribe Terminar cuando desees exportar el archivo TXT para la DGII.",
             parse_mode="Markdown",
@@ -84,6 +89,11 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     rnc = args[0]
     pin = args[1]
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
     try:
         company = state_manager.login_company(chat_id=chat_id, rnc=rnc, pin=pin)
@@ -159,6 +169,11 @@ async def handle_company_callback(update: Update, context: ContextTypes.DEFAULT_
     data = query.data or ""
 
     if data.startswith("switch_company:"):
+        session = state_manager.get_session(chat_id)
+        if session.state != UserState.IDLE:
+            await query.answer("⚠️ Tienes una factura en revisión. Confírmala o descártala con /cancelar antes de cambiar de empresa.", show_alert=True)
+            return
+
         target_rnc = data.split(":", 1)[1]
         try:
             company = state_manager.switch_active_company(chat_id, target_rnc)

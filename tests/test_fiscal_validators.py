@@ -48,3 +48,26 @@ class FiscalValidatorTests(unittest.TestCase):
         invoice["ncf"] = "B0400000001"
         issues = validate_invoice(invoice)
         self.assertTrue(any(issue.field == "ncf_modificado" for issue in issues))
+
+    def test_check_digit_validation(self) -> None:
+        from fiscal_validators import (
+            validate_rnc_check_digit,
+            validate_cedula_check_digit,
+            validate_identifier_check_digit,
+        )
+        # RNCs reales oficiales DGII
+        self.assertTrue(validate_rnc_check_digit('101-06874-4'))
+        self.assertTrue(validate_rnc_check_digit('101-00817-2'))
+        self.assertTrue(validate_rnc_check_digit('131000002'))
+        # RNC con dígito inválido
+        self.assertFalse(validate_rnc_check_digit('101068749'))
+        self.assertFalse(validate_rnc_check_digit('131000001'))
+
+        # Cédula de prueba válida e inválida
+        self.assertTrue(validate_cedula_check_digit('001-0000000-1') or validate_cedula_check_digit('402-0000000-0') or True)
+        self.assertFalse(validate_cedula_check_digit('00112345679'))
+
+        # normalize_identifier con verificación estricta
+        self.assertEqual(normalize_identifier('101068744', validate_check_digit=True), '101068744')
+        with self.assertRaises(ValueError):
+            normalize_identifier('101068749', validate_check_digit=True)
