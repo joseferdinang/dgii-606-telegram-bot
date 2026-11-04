@@ -5,14 +5,10 @@ from unittest.mock import patch
 from fiscal_validators import (
     validate_rnc_check_digit,
     validate_cedula_check_digit,
-    validate_identifier_check_digit,
     normalize_identifier,
 )
 from ocr_engine import InvoiceOCREngine
-from data_flywheel import (
-    synthesize_raw_invoice_text,
-    record_training_sample,
-)
+from data_flywheel import synthesize_raw_invoice_text
 
 
 class TestImprovements(unittest.TestCase):

@@ -17,7 +17,7 @@ try:
 except ImportError:
     Table = TableStyleInfo = None
 
-from fiscal_validators import decimal_text, infer_tipo_id, normalize_amount, normalize_date
+from fiscal_validators import infer_tipo_id, normalize_amount, normalize_date
 
 
 SHEET_NAME = "606"

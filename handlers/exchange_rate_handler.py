@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from fiscal_validators import decimal_text, normalize_amount
-from handlers.confirmation_handler import send_category_selection, proceed_to_next_step
+from handlers.confirmation_handler import proceed_to_next_step
 from state_manager import state_manager
 
 TASA_MIN = Decimal("50")

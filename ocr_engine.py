@@ -13,7 +13,6 @@ Nota: analyze_pdf_pages() es el punto de entrada para PDFs.
 """
 
 import io
-import json
 import logging
 import re
 from dataclasses import dataclass, field

@@ -16,7 +16,7 @@ from fiscal_validators import (
     normalize_ncf,
     validate_invoice,
 )
-from state_manager import DuplicateInvoiceError, InvoiceSession, UserState, state_manager
+from state_manager import DuplicateInvoiceError, UserState, state_manager
 
 logger = logging.getLogger(__name__)
 

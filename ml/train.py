@@ -1,5 +1,4 @@
 """Training script for the invoice field classifier with enhanced Dominican dataset."""
-import os
 from pathlib import Path
 import joblib
 import pandas as pd
@@ -59,13 +58,6 @@ def main():
     
     joblib.dump(clf, model_path)
     print(f"\nTrained model successfully saved to: {model_path}")
-    
-    report_path = Path(__file__).parent.parent / "ml_report.txt"
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write("=== CLASSIFICATION REPORT: DOMINICAN INVOICE FIELD EXTRACTOR ===\n")
-        f.write(f"Total samples: {len(y)} tokens\n")
-        f.write(report)
-    print(f"Report saved to: {report_path}")
 
 
 if __name__ == "__main__":
