@@ -1,11 +1,19 @@
 """ML-based field extractor that complements regex extraction and supports continuous active learning."""
 from __future__ import annotations
 
-import joblib
 import logging
 from pathlib import Path
 from typing import Optional
-import pandas as pd
+
+try:
+    import joblib
+except ImportError:
+    joblib = None
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 from ml.feature_engineering import tokenize, build_features
 
@@ -21,6 +29,11 @@ class MLFieldExtractor:
 
     def reload(self, model_path: Optional[Path] = None) -> bool:
         """Recarga el modelo entrenado en memoria sin necesidad de reiniciar el bot."""
+        if joblib is None:
+            logger.debug("joblib no disponible para MLFieldExtractor")
+            self.available = False
+            return False
+
         path = model_path or self.model_path
         if not path or not path.exists():
             logger.warning("ML model not found at %s", path)
@@ -39,7 +52,7 @@ class MLFieldExtractor:
             return False
 
     def extract(self, ocr_text: str) -> dict[str, tuple[str, float]]:
-        if not self.available or not self.model:
+        if not self.available or not self.model or pd is None:
             return {}
             
         tokens = tokenize(ocr_text)

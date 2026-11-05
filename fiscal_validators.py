@@ -116,12 +116,24 @@ def is_valid_identifier_checksum(identifier: Any) -> bool:
     return False
 
 
-def normalize_identifier(value: Any, *, strict_checksum: bool | None = None) -> str:
+# Aliases compatibles con test_check_digits_and_ocr y ocr_engine
+validate_rnc_check_digit = is_valid_rnc_checksum
+validate_cedula_check_digit = is_valid_cedula_checksum
+validate_identifier_check_digit = is_valid_identifier_checksum
+
+
+def normalize_identifier(
+    value: Any,
+    *,
+    strict_checksum: bool | None = None,
+    validate_check_digit: bool | None = None,
+) -> str:
     """Return a nine-digit RNC or eleven-digit cedula, or raise ValueError."""
     digits = _clean_digits(value)
     if not (RNC_PATTERN.fullmatch(digits) or CEDULA_PATTERN.fullmatch(digits)):
         raise ValueError("El RNC debe tener 9 dígitos o la cédula 11 dígitos.")
-    use_strict = _default_strict_checksum() if strict_checksum is None else strict_checksum
+    explicit_flag = strict_checksum if strict_checksum is not None else validate_check_digit
+    use_strict = _default_strict_checksum() if explicit_flag is None else explicit_flag
     if use_strict and not is_valid_identifier_checksum(digits):
         tipo = "RNC" if len(digits) == 9 else "cédula"
         raise ValueError(f"El dígito verificador del {tipo} ({digits}) no es válido según la DGII.")
@@ -265,10 +277,16 @@ def normalize_extracted_fields(fields: dict[str, Any]) -> tuple[dict[str, Any], 
     return normalized, invalid
 
 
-def validate_invoice(data: dict[str, Any], *, strict_checksum: bool | None = None) -> list[ValidationIssue]:
+def validate_invoice(
+    data: dict[str, Any],
+    *,
+    strict_checksum: bool | None = None,
+    strict_check_digit: bool | None = None,
+) -> list[ValidationIssue]:
     """Return every locally verifiable blocking issue for an exportable 606 row."""
     issues: list[ValidationIssue] = []
-    use_strict = _default_strict_checksum() if strict_checksum is None else strict_checksum
+    explicit_flag = strict_checksum if strict_checksum is not None else strict_check_digit
+    use_strict = _default_strict_checksum() if explicit_flag is None else explicit_flag
 
     def require_normalized(field: str, normalizer, label: str) -> Any | None:
         try:

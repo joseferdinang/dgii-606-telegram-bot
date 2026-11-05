@@ -89,5 +89,24 @@ class TestOCRExtraction(unittest.TestCase):
     def test_normalize_plain_number(self):
         self.assertEqual(InvoiceOCREngine._normalize_amount("1250.50"), "1250.50")
 
+
+    def test_extract_rnc_excludes_client_rnc(self):
+        text = 'DATOS DEL CLIENTE:\nCLIENTE: JUAN PEREZ\nRNC: 131-00000-1\n\nDATOS DEL EMISOR:\nTOTALENERGIES\nRNC: 101-06874-4'
+        res = InvoiceOCREngine._extract_rnc_cedula(text)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.value, '101068744')
+
+    def test_extract_rnc_discards_buyer_rnc(self):
+        text = 'FACTURA CON RNC: 101-00817-2 Y RNC: 101-06874-4'
+        res = InvoiceOCREngine._extract_rnc_cedula(text, buyer_rnc='101008172')
+        self.assertIsNotNone(res)
+        self.assertEqual(res.value, '101068744')
+
+    def test_extract_rnc_prefers_valid_check_digit(self):
+        text = '101068749 101068744'
+        res = InvoiceOCREngine._extract_rnc_cedula(text)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.value, '101068744')
+
 if __name__ == '__main__':
     unittest.main()

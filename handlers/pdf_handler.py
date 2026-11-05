@@ -1,4 +1,4 @@
-"""PDF reception, page rendering and asynchronous OCR / multimodal vision execution."""
+"""PDF reception, page rendering and asynchronous OCR / multimodal vision execution with batch queue support."""
 
 from __future__ import annotations
 
@@ -6,7 +6,11 @@ import asyncio
 import io
 import logging
 
-from pdf2image import convert_from_bytes
+try:
+    from pdf2image import convert_from_bytes
+except ImportError:
+    convert_from_bytes = None
+
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -21,6 +25,9 @@ MAX_PDF_PAGES = 10
 
 
 def _pdf_to_images(pdf_bytes: bytes) -> list[bytes]:
+    if convert_from_bytes is None:
+        logger.warning("pdf2image no disponible en el entorno")
+        return []
     images = convert_from_bytes(pdf_bytes, dpi=PDF_RENDER_DPI, fmt="jpeg", first_page=1, last_page=MAX_PDF_PAGES)
     pages: list[bytes] = []
     for image in images:
@@ -48,15 +55,33 @@ async def handle_invoice_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    if state_manager.get_session(chat_id).state != UserState.IDLE:
-        await message.reply_text("Ya hay una factura en proceso. Confírmala, corrígela o usa /cancelar antes de enviar otra.")
-        return
     document = message.document
     if document.file_size and document.file_size > MAX_PDF_SIZE_MB * 1024 * 1024:
         await message.reply_text(f"El PDF supera {MAX_PDF_SIZE_MB} MB. Envía un archivo más pequeño o una foto.")
         return
+
+    file_name = document.file_name or "factura.pdf"
+    rnc_scope = active_company.rnc if active_company else None
+
+    # Si ya hay una factura en revisión o procesándose, encolamos el PDF
+    if state_manager.get_session(chat_id).state != UserState.IDLE:
+        count = state_manager.enqueue_media(
+            chat_id,
+            document.file_id,
+            "pdf",
+            media_group_id=message.media_group_id,
+            file_name=file_name,
+            rnc=rnc_scope,
+        )
+        await message.reply_text(
+            f"📥 PDF *{file_name}* añadido a la cola (Facturas en espera: {count}).\n"
+            "Se procesará automáticamente en cuanto confirmes o descartes la factura actual.",
+            parse_mode="Markdown",
+        )
+        return
+
     state_manager.set_state(chat_id, UserState.PROCESSING_OCR)
-    await message.reply_text("PDF recibido. Convirtiendo y analizando páginas.")
+    await message.reply_text(f"PDF {file_name} recibido. Convirtiendo y analizando páginas...")
     
     pages = []
     try:
@@ -64,9 +89,10 @@ async def handle_invoice_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pdf_bytes = bytes(await telegram_file.download_as_bytearray())
         pages = await asyncio.to_thread(_pdf_to_images, pdf_bytes)
         if not pages:
-            raise ValueError("PDF sin páginas")
+            raise ValueError("PDF sin páginas legibles")
         engine: InvoiceOCREngine = context.bot_data["ocr_engine"]
-        result = await asyncio.to_thread(engine.analyze_pdf_pages, pages)
+        buyer_rnc = active_company.rnc if active_company else None
+        result = await asyncio.to_thread(engine.analyze_pdf_pages, pages, buyer_rnc=buyer_rnc)
     except Exception:
         logger.warning(
             "Google Vision OCR falló o no disponible para PDF en chat_id=%s. Activando fallback directo a GPT Multimodal",

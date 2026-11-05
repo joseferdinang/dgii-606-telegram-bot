@@ -1,6 +1,13 @@
 import json
+import sys
 from unittest.mock import MagicMock, patch
 import unittest
+
+try:
+    import openai
+except ImportError:
+    openai = MagicMock()
+    sys.modules["openai"] = openai
 
 from llm_extractor import LLMFieldExtractor
 
@@ -79,7 +86,7 @@ class TestLLMFieldExtractor(unittest.TestCase):
         self.assertTrue(extractor.is_available)
 
         sample_ocr = "COMERCIAL X SRL\nRNC: 131-00000-1\nNCF: B0100000005\nSUBTOTAL: 2,000.00\nITBIS: 360.00\nTOTAL: 2,360.00"
-        result = extractor.extract_from_text(sample_ocr)
+        result = extractor.extract_from_text(sample_ocr, buyer_rnc="101008172")
 
         self.assertEqual(result.get("rnc_cedula"), "131000001")
         self.assertEqual(result.get("ncf"), "B0100000005")
@@ -88,6 +95,10 @@ class TestLLMFieldExtractor(unittest.TestCase):
         self.assertEqual(result.get("monto_servicios"), "2000.00")
         self.assertEqual(result.get("tipo_bienes_servicios"), "02")
         self.assertEqual(result.get("forma_pago"), "02")
+
+        # Verify buyer_rnc was included in prompt
+        sent_messages = mock_client.chat.completions.create.call_args[1]["messages"]
+        self.assertIn("101008172", sent_messages[1]["content"])
 
     @patch("openai.OpenAI")
     def test_extract_handles_api_exception_gracefully(self, mock_openai_cls):

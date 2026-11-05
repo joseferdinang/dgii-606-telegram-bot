@@ -63,12 +63,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"🆔 *RNC:* `{active.rnc}`\n"
             f"📋 *Facturas en lote actual:* {count} (Período: {period})\n\n"
             "Envía fotos o PDFs de tus facturas para agregarlas al 606.\n"
+            "✨ *¡Puedes enviar varias fotos o archivos al mismo tiempo!* Se añadirán a la cola y se procesarán en orden.\n\n"
             "Escribe *Terminar* cuando quieras recibir el archivo TXT para la DGII.\n\n"
             "💡 *Comandos disponibles:*\n"
+            "/resumen - Ver resumen y facturas del lote actual\n"
+            "/eliminar - Eliminar una factura por NCF\n"
             "/empresa - Ver o cambiar tu empresa activa\n"
             "/logout - Cerrar sesión en esta empresa\n"
-            "/estado - Ver estado del lote actual\n"
-            "/cancelar - Descartar factura en proceso\n/reentrenar - Re-entrenar modelo ML con facturas reales",
+            "/estado - Ver estado del lote y cola actual\n"
+            "/cola - Ver facturas pendientes en cola\n"
+            "/cancelar_cola - Limpiar la cola de espera\n"
+            "/cancelar - Descartar factura en proceso\n"
+            "/reentrenar - Re-entrenar modelo ML con facturas reales",
             parse_mode="Markdown",
         )
     else:
@@ -87,8 +93,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state_manager.clear_session(update.effective_chat.id)
-    await update.message.reply_text("La factura en proceso fue descartada. Las facturas ya confirmadas siguen en el lote.")
+    chat_id = update.effective_chat.id
+    state_manager.clear_session(chat_id)
+    from handlers.queue_handler import process_next_queued_media
+    has_next = await process_next_queued_media(update, context)
+    if not has_next:
+        await update.message.reply_text("La factura en proceso fue descartada. Las facturas ya confirmadas siguen en el lote.")
 
 
 async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -98,10 +108,124 @@ async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     count = state_manager.batch_count(chat_id, rnc=rnc_scope)
     period = state_manager.batch_period(chat_id, rnc=rnc_scope) or "sin período"
     pending = state_manager.get_session(chat_id).state != UserState.IDLE
+    queue_count = state_manager.get_queue_count(chat_id, rnc=rnc_scope)
     company_str = f"🏢 Empresa activa: {active.razon_social} (`{active.rnc}`)\n" if active else ""
+    queue_str = f" Facturas en cola: {queue_count}." if queue_count > 0 else ""
     await update.message.reply_text(
-        f"{company_str}📋 Lote actual: {count} factura(s). Período: {period}. Factura pendiente: {'sí' if pending else 'no'}."
+        f"{company_str}📋 Lote actual: {count} factura(s). Período: {period}. Factura en revisión: {'sí' if pending else 'no'}.{queue_str}"
     )
+
+
+async def cmd_cola(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    active = state_manager.get_active_company(chat_id)
+    rnc_scope = active.rnc if active else None
+    count = state_manager.get_queue_count(chat_id, rnc=rnc_scope)
+    if count == 0:
+        await update.message.reply_text("📭 No hay facturas en cola de espera.")
+    else:
+        await update.message.reply_text(f"📥 Tienes {count} factura(s) en cola esperando a ser revisadas.")
+
+
+async def cmd_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra un resumen financiero completo y el listado de facturas en el lote actual."""
+    chat_id = update.effective_chat.id
+    active = state_manager.get_active_company(chat_id)
+    rnc_scope = active.rnc if active else None
+
+    summary = state_manager.get_batch_summary(chat_id, rnc=rnc_scope)
+    queue_count = state_manager.get_queue_count(chat_id, rnc=rnc_scope)
+    pending_sess = state_manager.get_session(chat_id)
+    has_pending = pending_sess.state != UserState.IDLE
+
+    if summary["count"] == 0:
+        company_info = f" para *{active.razon_social}* (`{active.rnc}`)" if active else ""
+        queue_info = f"\n📥 Tienes {queue_count} factura(s) en cola de espera." if queue_count > 0 else ""
+        pending_info = "\n⏳ Tienes una factura pendiente de revisión." if has_pending else ""
+        await update.message.reply_text(
+            f"📋 *Lote 606 vacío*{company_info}.\n\n"
+            f"No hay facturas confirmadas en el lote actual.{queue_info}{pending_info}\n"
+            "Envía fotos o archivos PDF para comenzar a agregar comprobantes.",
+            parse_mode="Markdown",
+        )
+        return
+
+    from fiscal_validators import decimal_text
+
+    company_title = f"🏢 *Empresa:* {active.razon_social} (`{active.rnc}`)\n" if active else ""
+    period_str = summary["period"] or "Sin período"
+
+    header = (
+        f"📊 *Resumen de Facturas del Lote 606*\n"
+        f"{company_title}"
+        f"📅 *Período:* `{period_str}`\n"
+        f"📋 *Total Comprobantes:* {summary['count']}\n\n"
+        f"💰 *Totales Acumulados:*\n"
+        f"• *Total Facturado:* RD$ {decimal_text(summary['total_monto'])}\n"
+        f"• *ITBIS Facturado:* RD$ {decimal_text(summary['total_itbis'])}\n"
+        f"• *Bienes (sin ITBIS):* RD$ {decimal_text(summary['total_bienes'])}\n"
+        f"• *Servicios (sin ITBIS):* RD$ {decimal_text(summary['total_servicios'])}\n\n"
+        f"📑 *Detalle de Comprobantes:*\n"
+    )
+
+    items_text = []
+    display_items = summary["items"][:25]
+    for it in display_items:
+        it_fecha = it["fecha"]
+        fecha_fmt = f"{it_fecha[6:8]}/{it_fecha[4:6]}/{it_fecha[:4]}" if len(it_fecha) == 8 else it_fecha
+        items_text.append(
+            f"`{it['index']}.` *{it['ncf']}* | RNC: `{it['rnc_cedula']}` | {fecha_fmt}\n"
+            f"   Total: RD$ {decimal_text(it['monto_total'])} | ITBIS: RD$ {decimal_text(it['itbis'])} | Cat: `{it['categoria']}`"
+        )
+
+    if len(summary["items"]) > 25:
+        items_text.append(f"\n_... y {len(summary['items']) - 25} comprobante(s) adicional(es)_")
+
+    footer = "\n\n💡 *Comandos útiles:*\n• Escribe *Terminar* o /terminar para exportar el TXT de la DGII.\n• Usa `/eliminar <NCF>` para retirar una factura del lote."
+    if queue_count > 0:
+        footer = f"\n\n📥 *En cola de espera:* {queue_count} factura(s).\n" + footer
+
+    await update.message.reply_text(header + "\n".join(items_text) + footer, parse_mode="Markdown")
+
+
+async def cmd_eliminar_factura(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Elimina una factura específica del lote actual mediante su NCF."""
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "🗑️ *Eliminar factura del lote actual*\n\n"
+            "Uso: `/eliminar <NCF>`\n"
+            "*Ejemplo:* `/eliminar B0100000001`",
+            parse_mode="Markdown",
+        )
+        return
+
+    ncf_to_delete = args[0].strip().upper()
+    active = state_manager.get_active_company(chat_id)
+    rnc_scope = active.rnc if active else None
+
+    deleted = state_manager.delete_invoice_from_batch(chat_id, ncf_to_delete, rnc=rnc_scope)
+    if deleted:
+        remaining = state_manager.batch_count(chat_id, rnc=rnc_scope)
+        await update.message.reply_text(
+            f"✅ Factura con NCF `{ncf_to_delete}` eliminada del lote.\n"
+            f"📋 Facturas restantes en el lote: {remaining}",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ No se encontró ninguna factura con el NCF `{ncf_to_delete}` en el lote actual.",
+            parse_mode="Markdown",
+        )
+
+
+async def cmd_cancelar_cola(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    active = state_manager.get_active_company(chat_id)
+    rnc_scope = active.rnc if active else None
+    removed = state_manager.clear_media_queue(chat_id, rnc=rnc_scope)
+    await update.message.reply_text(f"🗑️ Se han descartado {removed} factura(s) de la cola de espera.")
 
 
 async def cmd_descartar_lote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -109,7 +233,8 @@ async def cmd_descartar_lote(update: Update, context: ContextTypes.DEFAULT_TYPE)
     active = state_manager.get_active_company(chat_id)
     rnc_scope = active.rnc if active else None
     state_manager.clear_batch_and_session(chat_id, rnc=rnc_scope)
-    await update.message.reply_text("El lote actual y la factura pendiente fueron descartados.")
+    state_manager.clear_media_queue(chat_id, rnc=rnc_scope)
+    await update.message.reply_text("El lote actual, la factura pendiente y la cola fueron descartados.")
 
 
 async def cmd_terminar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -123,6 +248,14 @@ async def cmd_terminar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     active = state_manager.get_active_company(chat_id)
     rnc_scope = active.rnc if active else None
+    queue_count = state_manager.get_queue_count(chat_id, rnc=rnc_scope)
+    if queue_count > 0:
+        await update.message.reply_text(
+            f"⚠️ Tienes {queue_count} factura(s) pendiente(s) en la cola de revisión.\n"
+            "Confírmalas o usa /cancelar_cola para descartarlas antes de exportar el lote."
+        )
+        return
+
     invoices = state_manager.get_batch(chat_id, rnc=rnc_scope)
     if not invoices:
         await update.message.reply_text("No hay facturas confirmadas en el lote actual.")
@@ -169,6 +302,35 @@ async def cmd_terminar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 ),
             )
         delivered = True
+
+        # Archivar lote en historial de auditoría
+        period_str = output_path.stem.split('_')[-1]
+        state_manager.archive_batch(chat_id, reporting_rnc, period_str)
+
+        # Generar y enviar respaldo en Excel si el exportador está disponible
+        excel_path: Path | None = None
+        try:
+            excel_exporter: Excel606Exporter = context.bot_data.get("excel_exporter")
+            if excel_exporter:
+                excel_path = await asyncio.to_thread(
+                    excel_exporter.export,
+                    invoices,
+                    chat_id=chat_id,
+                    reporting_rnc=reporting_rnc,
+                )
+                with excel_path.open("rb") as excel_file:
+                    await update.message.reply_document(
+                        document=InputFile(excel_file, filename=excel_path.name),
+                        caption="📊 Respaldo en Excel Formato 606 con el desglose de los comprobantes.",
+                    )
+        except Exception:
+            logger.warning("No fue posible generar exportación Excel de respaldo", exc_info=True)
+        finally:
+            if excel_path:
+                try:
+                    excel_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
     except Exception:
         logger.exception("No fue posible exportar el lote en TXT", extra={"chat_id": chat_id})
         await update.message.reply_text("No pude generar o enviar el archivo TXT 606. El lote se conserva; intenta Terminar nuevamente.")
@@ -263,9 +425,15 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("terminar", cmd_terminar))
     application.add_handler(CommandHandler("cancelar", cmd_cancelar))
     application.add_handler(CommandHandler("estado", cmd_estado))
+    application.add_handler(CommandHandler("resumen", cmd_resumen))
+    application.add_handler(CommandHandler("facturas", cmd_resumen))
+    application.add_handler(CommandHandler("eliminar", cmd_eliminar_factura))
+    application.add_handler(CommandHandler("borrar", cmd_eliminar_factura))
     application.add_handler(CommandHandler("descartar_lote", cmd_descartar_lote))
     application.add_handler(CommandHandler("reentrenar", cmd_reentrenar_ml))
     application.add_handler(CommandHandler("reentrenar_ml", cmd_reentrenar_ml))
+    application.add_handler(CommandHandler("cola", cmd_cola))
+    application.add_handler(CommandHandler("cancelar_cola", cmd_cancelar_cola))
 
     # Comandos de autenticación y multi-empresa
     application.add_handler(CommandHandler("registro", cmd_registro))
@@ -275,8 +443,8 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("rnc", cmd_empresa))
     application.add_handler(CommandHandler("logout", cmd_logout))
 
-    # Handlers multimedia
-    application.add_handler(MessageHandler(filters.PHOTO, handle_invoice_photo))
+    # Handlers multimedia (incluyendo imágenes enviadas sin compresión como documento)
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_invoice_photo))
     application.add_handler(MessageHandler(filters.Document.PDF, handle_invoice_pdf))
 
     # Callbacks interactivos
@@ -288,10 +456,35 @@ def build_application() -> Application:
 
     # Mensajes de texto libres
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_text_message))
+
+    # Manejador global de excepciones
+    application.add_error_handler(global_error_handler)
     return application
 
 
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Excepción no controlada procesando update: %s", context.error, exc_info=context.error)
+    if isinstance(update, Update) and update.effective_chat:
+        chat_id = update.effective_chat.id
+        sess = state_manager.get_session(chat_id)
+        if sess.state == UserState.PROCESSING_OCR:
+            state_manager.clear_session(chat_id)
+        target = update.effective_message or (update.callback_query.message if update.callback_query else None)
+        if target:
+            try:
+                await target.reply_text(
+                    "⚠️ Ocurrió un error inesperado al procesar la solicitud. Tu sesión ha sido restablecida. "
+                    "Por favor intenta de nuevo."
+                )
+            except Exception:
+                pass
+
+
 async def _run_bot() -> None:
+    stale_count = state_manager.reset_stale_processing_sessions()
+    if stale_count > 0:
+        logger.info("Restablecidas %d sesiones colgadas al inicio", stale_count)
+
     application = build_application()
     logger.info("Bot 606 started")
     async with application:

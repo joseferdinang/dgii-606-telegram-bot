@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y poppler-utils \
+    && apt-get install --no-install-recommends -y poppler-utils libzbar0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 bot606 \
     && useradd --system --uid 10001 --gid bot606 --create-home bot606
@@ -19,7 +19,7 @@ COPY requirements.txt ./
 RUN pip install --requirement requirements.txt
 
 COPY --chown=bot606:bot606 . ./
-RUN mkdir -p /app/data/state /app/data/exports \
+RUN mkdir -p /app/data/state /app/data/exports /app/data/training_corpus /app/ml/models /app/credentials \
     && chown -R bot606:bot606 /app
 
 USER bot606

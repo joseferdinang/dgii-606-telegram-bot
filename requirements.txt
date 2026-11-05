@@ -6,6 +6,7 @@ google-cloud-vision
 Pillow
 pdf2image
 opencv-python-headless
+pyzbar
 
 # Machine Learning, LLM & Data Processing
 openai>=1.30

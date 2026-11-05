@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -20,6 +22,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
@@ -31,8 +34,19 @@ def normalize_rnc(rnc: str) -> str:
 
 
 def _hash_pin(pin: str, salt: str) -> str:
-    """Genera el hash seguro SHA-256 para el PIN de la empresa con sal."""
-    return hashlib.sha256(f"{salt}:{pin}".encode("utf-8")).hexdigest()
+    """Genera el hash seguro PBKDF2-HMAC-SHA256 para el PIN de la empresa con sal."""
+    return hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt.encode("utf-8"), 100_000).hex()
+
+
+def _verify_pin(pin: str, salt: str, expected_hash: str) -> bool:
+    """Verifica el PIN contra el hash almacenado con PBKDF2 y soporte de hash SHA-256 legacy."""
+    pbkdf2_hash = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt.encode("utf-8"), 100_000).hex()
+    if hmac.compare_digest(pbkdf2_hash, expected_hash):
+        return True
+    legacy_hash = hashlib.sha256(f"{salt}:{pin}".encode("utf-8")).hexdigest()
+    if hmac.compare_digest(legacy_hash, expected_hash):
+        return True
+    return False
 
 
 class UserState(str, Enum):
@@ -52,6 +66,7 @@ class InvoiceSession:
     extracted_data: dict = field(default_factory=dict)
     missing_fields: list[str] = field(default_factory=list)
     field_being_corrected: Optional[str] = None
+    company_rnc: str = ""
 
 
 @dataclass
@@ -98,13 +113,7 @@ class StateManager:
                     extracted_data TEXT NOT NULL,
                     missing_fields TEXT NOT NULL,
                     field_being_corrected TEXT,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS supplier_memory (
-                    rnc_cedula TEXT PRIMARY KEY,
-                    tipo_bienes_servicios TEXT,
-                    forma_pago TEXT,
-                    tipo_asignacion TEXT DEFAULT '',
+                    company_rnc TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS companies (
@@ -122,8 +131,81 @@ class StateManager:
                     authenticated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (chat_id, rnc)
                 );
+                CREATE TABLE IF NOT EXISTS media_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    rnc TEXT NOT NULL DEFAULT '',
+                    file_id TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    media_group_id TEXT,
+                    file_name TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_media_queue_chat ON media_queue(chat_id, rnc, id);
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    key TEXT PRIMARY KEY,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    locked_until REAL NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS exported_invoices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    rnc TEXT NOT NULL DEFAULT '',
+                    period TEXT NOT NULL,
+                    invoice_key TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    exported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_exported_invoices ON exported_invoices(rnc, invoice_key);
                 """
             )
+            # Manejo y migración de supplier_memory con company_rnc para estricto aislamiento
+            cursor_sm = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='supplier_memory'"
+            )
+            row_sm = cursor_sm.fetchone()
+            if row_sm is None:
+                connection.execute(
+                    """
+                    CREATE TABLE supplier_memory (
+                        company_rnc TEXT NOT NULL DEFAULT '',
+                        rnc_cedula TEXT NOT NULL,
+                        tipo_bienes_servicios TEXT,
+                        forma_pago TEXT,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (company_rnc, rnc_cedula)
+                    )
+                    """
+                )
+            else:
+                cols_sm = [c["name"] for c in connection.execute("PRAGMA table_info(supplier_memory)").fetchall()]
+                if "company_rnc" not in cols_sm:
+                    connection.executescript(
+                        """
+                        CREATE TABLE supplier_memory_new (
+                            company_rnc TEXT NOT NULL DEFAULT '',
+                            rnc_cedula TEXT NOT NULL,
+                            tipo_bienes_servicios TEXT,
+                            forma_pago TEXT,
+                            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (company_rnc, rnc_cedula)
+                        );
+                        INSERT INTO supplier_memory_new (company_rnc, rnc_cedula, tipo_bienes_servicios, forma_pago, updated_at)
+                        SELECT '', rnc_cedula, tipo_bienes_servicios, forma_pago, updated_at FROM supplier_memory;
+                        DROP TABLE supplier_memory;
+                        ALTER TABLE supplier_memory_new RENAME TO supplier_memory;
+                        """
+                    )
+
+            cols_sm_after = [c["name"] for c in connection.execute("PRAGMA table_info(supplier_memory)").fetchall()]
+            if "tipo_asignacion" not in cols_sm_after:
+                connection.execute("ALTER TABLE supplier_memory ADD COLUMN tipo_asignacion TEXT NOT NULL DEFAULT ''")
+
+            # Migración de columna company_rnc en sessions si no existía
+            cols_sess = [c["name"] for c in connection.execute("PRAGMA table_info(sessions)").fetchall()]
+            if "company_rnc" not in cols_sess:
+                connection.execute("ALTER TABLE sessions ADD COLUMN company_rnc TEXT NOT NULL DEFAULT ''")
+
             # Manejo y migración de batch_invoices con columna rnc
             cursor = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='batch_invoices'"
@@ -173,10 +255,20 @@ class StateManager:
     # -------------------------------------------------------------------------
     # GESTIÓN DE SESIONES DE ENTRADA (OCR Y CORRECCIONES)
     # -------------------------------------------------------------------------
+    def reset_stale_processing_sessions(self) -> int:
+        """Restablece al inicio sesiones colgadas en PROCESSING_OCR por reinicio abrupto."""
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE sessions SET state = ?, extracted_data = '{}', missing_fields = '[]', field_being_corrected = NULL "
+                "WHERE state = ?",
+                (UserState.IDLE.value, UserState.PROCESSING_OCR.value),
+            )
+            return cursor.rowcount
+
     def get_session(self, chat_id: int) -> InvoiceSession:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT state, extracted_data, missing_fields, field_being_corrected "
+                "SELECT state, extracted_data, missing_fields, field_being_corrected, company_rnc "
                 "FROM sessions WHERE chat_id = ?",
                 (chat_id,),
             ).fetchone()
@@ -191,19 +283,21 @@ class StateManager:
             extracted_data=json.loads(row["extracted_data"]),
             missing_fields=json.loads(row["missing_fields"]),
             field_being_corrected=row["field_being_corrected"],
+            company_rnc=row["company_rnc"] if "company_rnc" in row.keys() else "",
         )
 
     def _save_session(self, chat_id: int, session: InvoiceSession) -> None:
         with self._connection() as connection:
             connection.execute(
                 """
-                INSERT INTO sessions(chat_id, state, extracted_data, missing_fields, field_being_corrected)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO sessions(chat_id, state, extracted_data, missing_fields, field_being_corrected, company_rnc)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     state = excluded.state,
                     extracted_data = excluded.extracted_data,
                     missing_fields = excluded.missing_fields,
                     field_being_corrected = excluded.field_being_corrected,
+                    company_rnc = excluded.company_rnc,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
@@ -212,6 +306,7 @@ class StateManager:
                     json.dumps(session.extracted_data, ensure_ascii=False),
                     json.dumps(session.missing_fields, ensure_ascii=False),
                     session.field_being_corrected,
+                    session.company_rnc,
                 ),
             )
 
@@ -220,7 +315,7 @@ class StateManager:
         session.state = new_state
         self._save_session(chat_id, session)
 
-    def save_extracted_data(self, chat_id: int, data: dict, missing_fields: list[str]) -> None:
+    def save_extracted_data(self, chat_id: int, data: dict, missing_fields: list[str], company_rnc: str = "") -> None:
         self._save_session(
             chat_id,
             InvoiceSession(
@@ -228,6 +323,7 @@ class StateManager:
                 extracted_data=dict(data),
                 missing_fields=list(missing_fields),
                 field_being_corrected=missing_fields[0] if missing_fields else None,
+                company_rnc=company_rnc,
             ),
         )
 
@@ -244,6 +340,75 @@ class StateManager:
     def clear_session(self, chat_id: int) -> None:
         with self._connection() as connection:
             connection.execute("DELETE FROM sessions WHERE chat_id = ?", (chat_id,))
+
+    # -------------------------------------------------------------------------
+    # COLA DE ARCHIVOS Y MULTIMEDIA (PROCESAMIENTO POR LOTES / ÁLBUMES)
+    # -------------------------------------------------------------------------
+    def enqueue_media(
+        self,
+        chat_id: int,
+        file_id: str,
+        media_type: str,
+        *,
+        media_group_id: Optional[str] = None,
+        file_name: Optional[str] = None,
+        rnc: Optional[str] = None,
+    ) -> int:
+        """Encola una foto o PDF para procesamiento diferido y retorna el total en cola."""
+        rnc_scope = rnc or ""
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO media_queue (chat_id, rnc, file_id, media_type, media_group_id, file_name)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (chat_id, rnc_scope, file_id, media_type, media_group_id, file_name),
+            )
+            row = connection.execute(
+                "SELECT COUNT(*) as count FROM media_queue WHERE chat_id = ? AND rnc = ?",
+                (chat_id, rnc_scope),
+            ).fetchone()
+            return row["count"] if row else 1
+
+    def get_queue_count(self, chat_id: int, rnc: Optional[str] = None) -> int:
+        """Retorna la cantidad de archivos pendientes en cola para este chat y empresa."""
+        rnc_scope = rnc or ""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) as count FROM media_queue WHERE chat_id = ? AND rnc = ?",
+                (chat_id, rnc_scope),
+            ).fetchone()
+            return row["count"] if row else 0
+
+    def pop_next_queued_media(self, chat_id: int, rnc: Optional[str] = None) -> Optional[dict]:
+        """Extrae y elimina el elemento más antiguo de la cola (orden FIFO)."""
+        rnc_scope = rnc or ""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id, chat_id, rnc, file_id, media_type, media_group_id, file_name
+                FROM media_queue
+                WHERE chat_id = ? AND rnc = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (chat_id, rnc_scope),
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            connection.execute("DELETE FROM media_queue WHERE id = ?", (item["id"],))
+            return item
+
+    def clear_media_queue(self, chat_id: int, rnc: Optional[str] = None) -> int:
+        """Elimina todos los archivos pendientes en la cola para este chat y empresa."""
+        rnc_scope = rnc or ""
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM media_queue WHERE chat_id = ? AND rnc = ?",
+                (chat_id, rnc_scope),
+            )
+            return cursor.rowcount
 
     # -------------------------------------------------------------------------
     # GESTIÓN MULTI-EMPRESA Y CONTROL DE ACCESO (AUTENTICACIÓN CON PIN)
@@ -294,14 +459,52 @@ class StateManager:
         if not rnc_clean or not pin_str:
             raise ValueError("Debes ingresar el RNC y el PIN de acceso.")
 
+        now = time.time()
+        attempt_key = f"{chat_id}:{rnc_clean}"
+
         with self._connection() as connection:
+            # Comprobar si hay bloqueo por fuerza bruta activo
+            att_row = connection.execute(
+                "SELECT attempts, locked_until FROM login_attempts WHERE key = ?",
+                (attempt_key,),
+            ).fetchone()
+            if att_row and att_row["locked_until"] > now:
+                remaining_min = int((att_row["locked_until"] - now) / 60) + 1
+                raise ValueError(
+                    f"⛔ Acceso bloqueado temporalmente por demasiados intentos fallidos. "
+                    f"Por seguridad, espera {remaining_min} minuto(s) antes de intentar de nuevo."
+                )
+
             row = connection.execute(
                 "SELECT rnc, razon_social, pin_hash, salt, created_by_chat_id FROM companies WHERE rnc = ?",
                 (rnc_clean,),
             ).fetchone()
-            # Mensaje genérico para evitar enumeración de empresas registradas
-            if not row or _hash_pin(pin_str, row["salt"]) != row["pin_hash"]:
-                raise ValueError("RNC o PIN incorrecto.")
+
+            is_valid = bool(row and _verify_pin(pin_str, row["salt"], row["pin_hash"]))
+
+            if not is_valid:
+                cur_attempts = (att_row["attempts"] if att_row else 0) + 1
+                locked_until = (now + 900) if cur_attempts >= 5 else 0.0  # 15 minutos de bloqueo al 5to fallo
+                connection.execute(
+                    """
+                    INSERT INTO login_attempts(key, attempts, locked_until)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        attempts = excluded.attempts,
+                        locked_until = excluded.locked_until
+                    """,
+                    (attempt_key, cur_attempts, locked_until),
+                )
+                connection.commit()
+                if cur_attempts >= 5:
+                    raise ValueError(
+                        "⛔ Has alcanzado el límite de 5 intentos fallidos. "
+                        "El acceso a este RNC ha sido bloqueado temporalmente por 15 minutos."
+                    )
+                raise ValueError(f"RNC o PIN incorrecto. (Intento {cur_attempts} de 5)")
+
+            # Login exitoso: limpiar intentos fallidos
+            connection.execute("DELETE FROM login_attempts WHERE key = ?", (attempt_key,))
 
             # Desactivar otras empresas para este chat
             connection.execute("UPDATE user_companies SET is_active = 0 WHERE chat_id = ?", (chat_id,))
@@ -489,14 +692,16 @@ class StateManager:
         rnc_cedula: str,
         tipo_bienes_servicios: str,
         forma_pago: str,
+        company_rnc: str = "",
         tipo_asignacion: str = "",
     ) -> None:
+        comp_scope = normalize_rnc(company_rnc) if company_rnc else ""
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO supplier_memory (rnc_cedula, tipo_bienes_servicios, forma_pago, tipo_asignacion)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(rnc_cedula) DO UPDATE SET
+                INSERT INTO supplier_memory (company_rnc, rnc_cedula, tipo_bienes_servicios, forma_pago, tipo_asignacion)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(company_rnc, rnc_cedula) DO UPDATE SET
                     tipo_bienes_servicios=excluded.tipo_bienes_servicios,
                     forma_pago=excluded.forma_pago,
                     tipo_asignacion=CASE
@@ -505,21 +710,120 @@ class StateManager:
                     END,
                     updated_at=CURRENT_TIMESTAMP
                 """,
-                (rnc_cedula, tipo_bienes_servicios, forma_pago, tipo_asignacion or ""),
+                (comp_scope, rnc_cedula, tipo_bienes_servicios, forma_pago, tipo_asignacion or ""),
             )
 
-    def get_supplier_memory(self, rnc_cedula: str) -> dict[str, str]:
+    def get_supplier_memory(self, rnc_cedula: str, company_rnc: str = "") -> dict[str, str]:
+        comp_scope = normalize_rnc(company_rnc) if company_rnc else ""
         with self._connection() as conn:
-            row = conn.execute(
-                "SELECT tipo_bienes_servicios, forma_pago, tipo_asignacion FROM supplier_memory WHERE rnc_cedula = ?",
-                (rnc_cedula,),
-            ).fetchone()
+            row = None
+            if comp_scope:
+                row = conn.execute(
+                    "SELECT tipo_bienes_servicios, forma_pago, tipo_asignacion FROM supplier_memory WHERE company_rnc = ? AND rnc_cedula = ?",
+                    (comp_scope, rnc_cedula),
+                ).fetchone()
+            if not row:
+                # Fallback genérico si no había registro bajo la empresa específica
+                row = conn.execute(
+                    "SELECT tipo_bienes_servicios, forma_pago, tipo_asignacion FROM supplier_memory WHERE company_rnc = '' AND rnc_cedula = ?",
+                    (rnc_cedula,),
+                ).fetchone()
         if row:
             res = {"tipo_bienes_servicios": row["tipo_bienes_servicios"], "forma_pago": row["forma_pago"]}
             if row["tipo_asignacion"]:
                 res["tipo_asignacion"] = row["tipo_asignacion"]
             return res
         return {}
+
+    def delete_invoice_from_batch(self, chat_id: int, ncf: str, rnc: str | None = None) -> bool:
+        """Elimina una factura del lote actual por su NCF. Retorna True si existía y fue borrada."""
+        rnc_scope = self._resolve_rnc(chat_id, rnc)
+        clean_ncf = str(ncf or "").strip().upper()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM batch_invoices WHERE chat_id = ? AND rnc = ? AND (invoice_key LIKE ? OR payload LIKE ?)",
+                (chat_id, rnc_scope, f"%:{clean_ncf}", f'%"ncf": "{clean_ncf}"%'),
+            )
+            return cursor.rowcount > 0
+
+    def archive_batch(self, chat_id: int, rnc: str, period: str) -> int:
+        """Archiva el lote exportado en exported_invoices para historial y auditoría."""
+        rnc_scope = normalize_rnc(rnc)
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT invoice_key, payload FROM batch_invoices WHERE chat_id = ? AND rnc = ?",
+                (chat_id, rnc_scope),
+            ).fetchall()
+            for r in rows:
+                connection.execute(
+                    """
+                    INSERT INTO exported_invoices (chat_id, rnc, period, invoice_key, payload)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (chat_id, rnc_scope, period, r["invoice_key"], r["payload"]),
+                )
+            return len(rows)
+
+    def is_invoice_previously_exported(self, rnc: str, ncf: str) -> Optional[dict]:
+        """Comprueba si una factura ya fue reportada y exportada en un lote anterior."""
+        rnc_scope = normalize_rnc(rnc)
+        clean_ncf = str(ncf or "").strip().upper()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT period, exported_at FROM exported_invoices WHERE rnc = ? AND invoice_key LIKE ? ORDER BY id DESC LIMIT 1",
+                (rnc_scope, f"%:{clean_ncf}"),
+            ).fetchone()
+            if row:
+                return {"period": row["period"], "exported_at": row["exported_at"]}
+        return None
+
+    def get_batch_summary(self, chat_id: int, rnc: str | None = None) -> dict:
+        """Calcula el resumen financiero y la lista detallada de facturas del lote actual."""
+        invoices = self.get_batch(chat_id, rnc=rnc)
+        from fiscal_validators import normalize_amount
+
+        total_monto = Decimal("0.00")
+        total_itbis = Decimal("0.00")
+        total_servicios = Decimal("0.00")
+        total_bienes = Decimal("0.00")
+
+        items = []
+        for index, inv in enumerate(invoices, start=1):
+            try:
+                m = normalize_amount(inv.get("monto_total", "0"), allow_empty=True) or Decimal("0.00")
+                itb = normalize_amount(inv.get("itbis_facturado", "0"), allow_empty=True) or Decimal("0.00")
+                s = normalize_amount(inv.get("monto_servicios", "0"), allow_empty=True) or Decimal("0.00")
+                b = normalize_amount(inv.get("monto_bienes", "0"), allow_empty=True) or Decimal("0.00")
+            except Exception:
+                m = itb = s = b = Decimal("0.00")
+
+            total_monto += m
+            total_itbis += itb
+            total_servicios += s
+            total_bienes += b
+
+            items.append({
+                "index": index,
+                "rnc_cedula": inv.get("rnc_cedula", ""),
+                "ncf": inv.get("ncf", ""),
+                "fecha": inv.get("fecha_comprobante", ""),
+                "monto_total": m,
+                "itbis": itb,
+                "servicios": s,
+                "bienes": b,
+                "categoria": inv.get("tipo_bienes_servicios", ""),
+                "forma_pago": inv.get("forma_pago", ""),
+            })
+
+        return {
+            "count": len(invoices),
+            "total_monto": total_monto,
+            "total_itbis": total_itbis,
+            "total_servicios": total_servicios,
+            "total_bienes": total_bienes,
+            "period": self.batch_period(chat_id, rnc=rnc),
+            "items": items,
+        }
 
     def clear_batch_and_session(self, chat_id: int, rnc: str | None = None) -> None:
         rnc_scope = self._resolve_rnc(chat_id, rnc)
@@ -531,4 +835,4 @@ class StateManager:
 # Importing the repository creates the database directory.  STATE_DB_PATH is
 # intentionally read from the environment so the same module works locally and
 # inside Docker without mutable process-global reconfiguration.
-state_manager = StateManager(os.getenv("STATE_DB_PATH", "data/state/bot606.sqlite3"))
+state_manager = StateManager(os.getenv("STATE_DB_PATH", str(Path(os.getenv("APP_DATA_DIR", "data")) / "state" / "bot606.sqlite3")))

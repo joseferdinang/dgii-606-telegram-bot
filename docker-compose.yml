@@ -7,10 +7,9 @@ services:
       APP_DATA_DIR: /app/data
       STATE_DB_PATH: /app/data/state/bot606.sqlite3
       EXPORT_DIRECTORY: /app/data/exports
-      GOOGLE_VISION_CREDENTIALS: /run/secrets/google-vision.json
     volumes:
       - bot606_data:/app/data
-      - ./credentials/google-vision.json:/run/secrets/google-vision.json:ro
+      - ./credentials:/app/credentials:ro
     init: true
     restart: unless-stopped
 
