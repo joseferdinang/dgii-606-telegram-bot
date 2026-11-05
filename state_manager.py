@@ -104,6 +104,7 @@ class StateManager:
                     rnc_cedula TEXT PRIMARY KEY,
                     tipo_bienes_servicios TEXT,
                     forma_pago TEXT,
+                    tipo_asignacion TEXT DEFAULT '',
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS companies (
@@ -165,6 +166,9 @@ class StateManager:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_batch_invoices_chat_rnc ON batch_invoices(chat_id, rnc, id)"
             )
+            sm_cols = [c["name"] for c in connection.execute("PRAGMA table_info(supplier_memory)").fetchall()]
+            if "tipo_asignacion" not in sm_cols:
+                connection.execute("ALTER TABLE supplier_memory ADD COLUMN tipo_asignacion TEXT DEFAULT ''")
 
     # -------------------------------------------------------------------------
     # GESTIÓN DE SESIONES DE ENTRADA (OCR Y CORRECCIONES)
@@ -480,28 +484,41 @@ class StateManager:
             return None
         return str(invoices[0]["fecha_comprobante"])[:6]
 
-    def save_supplier_memory(self, rnc_cedula: str, tipo_bienes_servicios: str, forma_pago: str) -> None:
+    def save_supplier_memory(
+        self,
+        rnc_cedula: str,
+        tipo_bienes_servicios: str,
+        forma_pago: str,
+        tipo_asignacion: str = "",
+    ) -> None:
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO supplier_memory (rnc_cedula, tipo_bienes_servicios, forma_pago)
-                VALUES (?, ?, ?)
+                INSERT INTO supplier_memory (rnc_cedula, tipo_bienes_servicios, forma_pago, tipo_asignacion)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(rnc_cedula) DO UPDATE SET
                     tipo_bienes_servicios=excluded.tipo_bienes_servicios,
                     forma_pago=excluded.forma_pago,
+                    tipo_asignacion=CASE
+                        WHEN excluded.tipo_asignacion != '' THEN excluded.tipo_asignacion
+                        ELSE supplier_memory.tipo_asignacion
+                    END,
                     updated_at=CURRENT_TIMESTAMP
                 """,
-                (rnc_cedula, tipo_bienes_servicios, forma_pago),
+                (rnc_cedula, tipo_bienes_servicios, forma_pago, tipo_asignacion or ""),
             )
 
     def get_supplier_memory(self, rnc_cedula: str) -> dict[str, str]:
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT tipo_bienes_servicios, forma_pago FROM supplier_memory WHERE rnc_cedula = ?",
+                "SELECT tipo_bienes_servicios, forma_pago, tipo_asignacion FROM supplier_memory WHERE rnc_cedula = ?",
                 (rnc_cedula,),
             ).fetchone()
         if row:
-            return {"tipo_bienes_servicios": row["tipo_bienes_servicios"], "forma_pago": row["forma_pago"]}
+            res = {"tipo_bienes_servicios": row["tipo_bienes_servicios"], "forma_pago": row["forma_pago"]}
+            if row["tipo_asignacion"]:
+                res["tipo_asignacion"] = row["tipo_asignacion"]
+            return res
         return {}
 
     def clear_batch_and_session(self, chat_id: int, rnc: str | None = None) -> None:

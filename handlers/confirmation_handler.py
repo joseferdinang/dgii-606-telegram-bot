@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -52,6 +53,14 @@ FIELD_LABELS = {
     "monto_bienes": "Monto facturado en bienes, sin ITBIS",
     "fecha_pago": "Fecha de pago",
     "ncf_modificado": "NCF o e-CF modificado",
+    "monto_propina_legal": "Propina legal (10%)",
+    "impuesto_selectivo_consumo": "Impuesto Selectivo al Consumo (ISC)",
+    "otros_impuestos_tasas": "Otros impuestos o tasas",
+    "itbis_retenido": "ITBIS retenido",
+    "itbis_llevado_costo": "ITBIS llevado al costo",
+    "itbis_proporcionalidad": "ITBIS sujeto a proporcionalidad",
+    "tipo_retencion_isr": "Código de tipo de retención ISR (01-08)",
+    "isr_retenido": "Monto de retención ISR",
 }
 
 
@@ -66,31 +75,107 @@ def _format_money(value) -> str:
         return str(value)
 
 
-def _format_preview_text(fields: dict) -> str:
-    return "\n".join(
-        (
-            "Revisa la factura antes de añadirla al lote 606:",
-            f"RNC/Cédula: {fields.get('rnc_cedula', '')}",
-            f"NCF: {fields.get('ncf', '')}",
-            f"Fecha: {fields.get('fecha_comprobante', '')}",
-            f"Total comprobante: {_format_money(fields.get('monto_total', ''))}",
-            f"Servicios sin ITBIS: {_format_money(fields.get('monto_servicios', '0'))}",
-            f"Bienes sin ITBIS: {_format_money(fields.get('monto_bienes', '0'))}",
-            f"ITBIS: {_format_money(fields.get('itbis_facturado', ''))}",
-            f"Categoría: {fields.get('tipo_bienes_servicios', '')} - "
-            f"{TIPO_BIENES_SERVICIOS.get(fields.get('tipo_bienes_servicios', ''), '')}",
-            f"Forma de pago: {fields.get('forma_pago', '')} - "
-            f"{TIPO_FORMA_PAGO.get(fields.get('forma_pago', ''), '')}",
+GOODS_ONLY_CATEGORIES = {"09", "10"}
+SERVICES_ONLY_CATEGORIES = {"01", "03", "07", "11"}
+
+
+def _infer_allocation_mode(fields: dict, memory: dict | None = None) -> str | None:
+    """Infiere automáticamente si la base imponible corresponde a bienes o servicios."""
+    if memory and memory.get("tipo_asignacion") in ("goods", "services"):
+        return memory["tipo_asignacion"]
+    cat = str(fields.get("tipo_bienes_servicios") or "")
+    if cat in GOODS_ONLY_CATEGORIES:
+        return "goods"
+    if cat in SERVICES_ONLY_CATEGORIES:
+        return "services"
+    return None
+
+
+def _try_auto_allocate_base(chat_id: int, data: dict, mode: str) -> bool:
+    """Calcula y asigna automáticamente la base a bienes o servicios si los montos son válidos."""
+    from decimal import Decimal
+    if mode not in ("goods", "services"):
+        return False
+    try:
+        base = (
+            normalize_amount(data.get("monto_total"))
+            - normalize_amount(data.get("itbis_facturado"))
+            - (normalize_amount(data.get("impuesto_selectivo_consumo"), allow_empty=True) or Decimal("0"))
+            - (normalize_amount(data.get("otros_impuestos_tasas"), allow_empty=True) or Decimal("0"))
+            - (normalize_amount(data.get("monto_propina_legal"), allow_empty=True) or Decimal("0"))
         )
-    )
+    except ValueError:
+        return False
+    if base < Decimal("0"):
+        return False
+    state_manager.update_field(chat_id, "monto_servicios", decimal_text(base if mode == "services" else Decimal("0")))
+    state_manager.update_field(chat_id, "monto_bienes", decimal_text(base if mode == "goods" else Decimal("0")))
+    return True
+
+
+def _effective_itbis_label(fields: dict) -> str:
+    from decimal import Decimal
+    try:
+        serv = normalize_amount(fields.get("monto_servicios"), allow_empty=True) or Decimal("0")
+        bienes = normalize_amount(fields.get("monto_bienes"), allow_empty=True) or Decimal("0")
+        itbis = normalize_amount(fields.get("itbis_facturado"), allow_empty=True) or Decimal("0")
+        base = serv + bienes
+        if itbis == Decimal("0"):
+            return " (Exento 0%)"
+        if base > Decimal("0"):
+            pct = float((itbis / base) * Decimal("100"))
+            if abs(pct - 18.0) <= 0.6:
+                return " (18%)"
+            if abs(pct - 16.0) <= 0.6:
+                return " (16% - Tasa reducida)"
+            return f" ({pct:.1f}% efectivo - Mixto/Parcial)"
+    except ValueError:
+        pass
+    return ""
+
+
+def _format_preview_text(fields: dict) -> str:
+    from decimal import Decimal
+    lines = ["Revisa la factura antes de añadirla al lote 606:"]
+    if fields.get("_buyer_rnc_mismatch"):
+        lines.append(f"⚠️ Alerta RNC Comprador: {fields['_buyer_rnc_mismatch']}")
+    lines.extend([
+        f"RNC/Cédula: {fields.get('rnc_cedula', '')}",
+        f"NCF: {fields.get('ncf', '')}",
+        f"Fecha: {fields.get('fecha_comprobante', '')}",
+        f"Total comprobante: {_format_money(fields.get('monto_total', ''))}",
+        f"Servicios sin ITBIS: {_format_money(fields.get('monto_servicios', '0'))}",
+        f"Bienes sin ITBIS: {_format_money(fields.get('monto_bienes', '0'))}",
+        f"ITBIS{_effective_itbis_label(fields)}: {_format_money(fields.get('itbis_facturado', ''))}",
+    ])
+    for opt_field, label in (
+        ("monto_propina_legal", "Propina legal (10%)"),
+        ("impuesto_selectivo_consumo", "ISC"),
+        ("otros_impuestos_tasas", "Otros impuestos/tasas"),
+    ):
+        val = normalize_amount(fields.get(opt_field), allow_empty=True)
+        if val and val > Decimal("0"):
+            lines.append(f"{label}: {_format_money(val)}")
+    lines.extend([
+        f"Categoría: {fields.get('tipo_bienes_servicios', '')} - "
+        f"{TIPO_BIENES_SERVICIOS.get(fields.get('tipo_bienes_servicios', ''), '')}",
+        f"Forma de pago: {fields.get('forma_pago', '')} - "
+        f"{TIPO_FORMA_PAGO.get(fields.get('forma_pago', ''), '')}",
+    ])
+    return "\n".join(lines)
 
 
 async def send_preview_message(update: Update, context: ContextTypes.DEFAULT_TYPE, fields: dict) -> None:
     keyboard = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("Confirmar y añadir al lote", callback_data="confirm_invoice"),
-            InlineKeyboardButton("Corregir", callback_data="correct_invoice"),
-        ]]
+        [
+            [
+                InlineKeyboardButton("Confirmar y añadir al lote", callback_data="confirm_invoice"),
+                InlineKeyboardButton("Corregir", callback_data="correct_invoice"),
+            ],
+            [
+                InlineKeyboardButton("Cambiar Bienes/Servicios", callback_data="realloc_invoice"),
+            ],
+        ]
     )
     await _target_message(update).reply_text(_format_preview_text(fields), reply_markup=keyboard)
 
@@ -142,10 +227,7 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
     code = query.data.removeprefix("cat_")
     state_manager.update_field(chat_id, "tipo_bienes_servicios", code)
     await query.edit_message_text(f"Categoría seleccionada: {code} - {TIPO_BIENES_SERVICIOS[code]}")
-    if state_manager.get_session(chat_id).extracted_data.get("forma_pago"):
-        await send_amount_allocation(update, context)
-    else:
-        await send_forma_pago_selection(update, context)
+    await proceed_to_next_step(update, context)
 
 
 def _payment_keyboard() -> InlineKeyboardMarkup:
@@ -173,7 +255,7 @@ async def handle_forma_pago_callback(update: Update, context: ContextTypes.DEFAU
     code = query.data.removeprefix("fp_")
     state_manager.update_field(chat_id, "forma_pago", code)
     await query.edit_message_text(f"Forma de pago seleccionada: {code} - {TIPO_FORMA_PAGO[code]}")
-    await send_amount_allocation(update, context)
+    await proceed_to_next_step(update, context)
 
 
 async def send_amount_allocation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -236,7 +318,19 @@ def _normalise_manual_value(field_name: str, raw_value: str) -> str:
         return normalize_ncf(raw_value)
     if field_name in {"fecha_comprobante", "fecha_pago"}:
         return normalize_date(raw_value)
-    if field_name in {"monto_total", "itbis_facturado", "monto_servicios", "monto_bienes"}:
+    if field_name in {
+        "monto_total",
+        "itbis_facturado",
+        "monto_servicios",
+        "monto_bienes",
+        "monto_propina_legal",
+        "impuesto_selectivo_consumo",
+        "otros_impuestos_tasas",
+        "itbis_retenido",
+        "itbis_llevado_costo",
+        "itbis_proporcionalidad",
+        "isr_retenido",
+    }:
         return decimal_text(normalize_amount(raw_value))
     return raw_value.strip()
 
@@ -272,26 +366,36 @@ async def handle_manual_field_input(update: Update, context: ContextTypes.DEFAUL
     await proceed_to_next_step(update, context)
 
 async def proceed_to_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from decimal import Decimal
     chat_id = update.effective_chat.id
     session = state_manager.get_session(chat_id)
     
     rnc = session.extracted_data.get("rnc_cedula")
-    if rnc and not session.extracted_data.get("tipo_bienes_servicios"):
-        memory = state_manager.get_supplier_memory(rnc)
-        if memory:
-            session.extracted_data["tipo_bienes_servicios"] = memory.get("tipo_bienes_servicios")
-            session.extracted_data["forma_pago"] = memory.get("forma_pago")
-            state_manager.update_session(chat_id, session)
-            await _target_message(update).reply_text("Datos de categoría y forma de pago recuperados de factura anterior.")
+    memory = state_manager.get_supplier_memory(rnc) if rnc else {}
+    if rnc and not session.extracted_data.get("tipo_bienes_servicios") and memory:
+        session.extracted_data["tipo_bienes_servicios"] = memory.get("tipo_bienes_servicios")
+        session.extracted_data["forma_pago"] = memory.get("forma_pago")
+        state_manager.update_session(chat_id, session)
+        await _target_message(update).reply_text("Datos de categoría y forma de pago recuperados de factura anterior.")
 
     if session.extracted_data.get("tipo_bienes_servicios"):
         if session.extracted_data.get("forma_pago"):
-            has_bienes = session.extracted_data.get("monto_bienes") is not None
-            has_servicios = session.extracted_data.get("monto_servicios") is not None
-            if has_bienes and has_servicios:
+            serv_val = normalize_amount(session.extracted_data.get("monto_servicios"), allow_empty=True)
+            bienes_val = normalize_amount(session.extracted_data.get("monto_bienes"), allow_empty=True)
+            total_val = normalize_amount(session.extracted_data.get("monto_total"), allow_empty=True) or Decimal("0")
+            has_valid_allocation = (
+                serv_val is not None
+                and bienes_val is not None
+                and (serv_val + bienes_val > Decimal("0") or total_val == Decimal("0"))
+            )
+            if has_valid_allocation:
                 await show_validation_or_preview(update, context)
             else:
-                await send_amount_allocation(update, context)
+                inferred_mode = _infer_allocation_mode(session.extracted_data, memory)
+                if inferred_mode and _try_auto_allocate_base(chat_id, session.extracted_data, inferred_mode):
+                    await show_validation_or_preview(update, context)
+                else:
+                    await send_amount_allocation(update, context)
         else:
             await send_forma_pago_selection(update, context)
     else:
@@ -306,7 +410,7 @@ async def show_validation_or_preview(update: Update, context: ContextTypes.DEFAU
         issues = [ValidationIssue("ncf", "Ese NCF ya se encuentra en el lote actual.")]
     if issues:
         fields = _correction_fields(issues)
-        await _request_manual_fields(update, chat_id, fields, "La validación fiscal requiere una corrección.")
+        await _request_manual_fields(update, chat_id, fields, f"La validación fiscal requiere una corrección: {issues[0].message}")
         return
     state_manager.set_state(chat_id, UserState.WAITING_CONFIRMATION)
     await send_preview_message(update, context, session.extracted_data)
@@ -322,6 +426,14 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
     await query.answer()
     chat_id = update.effective_chat.id
     session = state_manager.get_session(chat_id)
+
+    if query.data == "realloc_invoice":
+        for field in ("monto_servicios", "monto_bienes"):
+            session.extracted_data.pop(field, None)
+        state_manager.update_session(chat_id, session)
+        await query.edit_message_text("Selecciona cómo distribuir la base sin ITBIS:")
+        await send_amount_allocation(update, context)
+        return
 
     if query.data == "correct_invoice":
         for field in ("monto_servicios", "monto_bienes"):
@@ -349,15 +461,26 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
     try:
         raw_text = session.extracted_data.pop("_raw_text", None)
         was_corrected = session.extracted_data.pop("_was_corrected", False)
+        session.extracted_data.pop("_buyer_rnc_mismatch", None)
+        session.extracted_data.pop("_usd_converted", None)
 
         state_manager.add_confirmed_invoice(chat_id, session.extracted_data)
         
-        # Guardar memoria del proveedor (RNC -> Categoria y Forma de Pago)
+        # Guardar memoria del proveedor (RNC -> Categoria, Forma de Pago y Tipo de Asignación)
         rnc = session.extracted_data.get("rnc_cedula")
         cat = session.extracted_data.get("tipo_bienes_servicios")
         fp = session.extracted_data.get("forma_pago")
         if rnc and cat and fp:
-            state_manager.save_supplier_memory(rnc, cat, fp)
+            from decimal import Decimal
+            serv_amt = normalize_amount(session.extracted_data.get("monto_servicios"), allow_empty=True) or Decimal("0")
+            bienes_amt = normalize_amount(session.extracted_data.get("monto_bienes"), allow_empty=True) or Decimal("0")
+            if bienes_amt > Decimal("0") and serv_amt == Decimal("0"):
+                alloc_mode = "goods"
+            elif serv_amt > Decimal("0") and bienes_amt == Decimal("0"):
+                alloc_mode = "services"
+            else:
+                alloc_mode = "mixed"
+            state_manager.save_supplier_memory(rnc, cat, fp, alloc_mode)
 
         # Data Flywheel: Registrar muestra confirmada para aprendizaje continuo
         try:

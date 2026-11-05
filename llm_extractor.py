@@ -300,4 +300,16 @@ class LLMFieldExtractor:
                 except (ValueError, TypeError):
                     pass
 
+        # Si el LLM devolvió 0.00 tanto en servicios como en bienes pero el total es > 0,
+        # omitir ambos para que el bot infiera o consulte la distribución exacta sin descuadrar la suma.
+        try:
+            tot = float(normalized.get("monto_total") or 0)
+            srv = float(normalized.get("monto_servicios") or 0)
+            bns = float(normalized.get("monto_bienes") or 0)
+            if tot > 0 and srv == 0 and bns == 0:
+                normalized.pop("monto_servicios", None)
+                normalized.pop("monto_bienes", None)
+        except (ValueError, TypeError):
+            pass
+
         return normalized
