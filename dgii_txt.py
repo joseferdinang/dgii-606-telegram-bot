@@ -98,11 +98,12 @@ class Record606:
     @classmethod
     def from_dict(cls, data: dict[str, Any], reporting_rnc: Optional[str] = None) -> Record606:
         raw_ncf = normalize_ncf(data["ncf"])
-        is_b17 = raw_ncf.startswith("B17")
+        # B17/E47 (Pagos al Exterior) y B13/E43 (Gastos Menores) son auto-emitidos con el RNC del declarante
+        is_self_issued = raw_ncf.startswith(("B17", "E47", "B13", "E43"))
 
-        if is_b17:
+        if is_self_issued:
             if not reporting_rnc:
-                raise ValueError("Se requiere reporting_rnc para procesar comprobantes tipo B17.")
+                raise ValueError(f"Se requiere reporting_rnc para procesar comprobantes tipo {raw_ncf[:3]}.")
             rnc_cedula = normalize_identifier(reporting_rnc)
             tipo_id = TipoId(infer_tipo_id(rnc_cedula))
         else:
@@ -136,24 +137,24 @@ class Record606:
         bienes = dec("monto_bienes")
         total_facturado = servicios + bienes
 
-        itbis = dec("itbis_facturado")
-        itbis_costo = dec("itbis_llevado_costo") if not is_b17 else Decimal("0.00")
+        itbis = dec("itbis_facturado") if not is_self_issued else Decimal("0.00")
+        itbis_costo = dec("itbis_llevado_costo") if not is_self_issued else Decimal("0.00")
         itbis_adelantar = itbis - itbis_costo
 
-        itbis_ret = dec("itbis_retenido") if not is_b17 else Decimal("0.00")
-        itbis_prop = dec("itbis_proporcionalidad") if not is_b17 else Decimal("0.00")
-        itbis_perc = dec("itbis_percibido_compras") if not is_b17 else Decimal("0.00")
+        itbis_ret = dec("itbis_retenido") if not is_self_issued else Decimal("0.00")
+        itbis_prop = dec("itbis_proporcionalidad") if not is_self_issued else Decimal("0.00")
+        itbis_perc = dec("itbis_percibido_compras") if not is_self_issued else Decimal("0.00")
 
-        isr_ret = dec("isr_retenido") if not is_b17 else Decimal("0.00")
-        isr_perc = dec("isr_percibido_compras") if not is_b17 else Decimal("0.00")
+        isr_ret = dec("isr_retenido") if not is_self_issued else Decimal("0.00")
+        isr_perc = dec("isr_percibido_compras") if not is_self_issued else Decimal("0.00")
 
         tipo_ret_isr = None
-        if not is_b17 and data.get("tipo_retencion_isr"):
+        if not is_self_issued and data.get("tipo_retencion_isr"):
             tipo_ret_isr = TipoRetencionISR(str(data["tipo_retencion_isr"]).zfill(2))
 
-        isc = dec("impuesto_selectivo_consumo") if not is_b17 else Decimal("0.00")
-        otros = dec("otros_impuestos_tasas") if not is_b17 else Decimal("0.00")
-        propina = dec("monto_propina_legal") if not is_b17 else Decimal("0.00")
+        isc = dec("impuesto_selectivo_consumo") if not is_self_issued else Decimal("0.00")
+        otros = dec("otros_impuestos_tasas") if not is_self_issued else Decimal("0.00")
+        propina = dec("monto_propina_legal") if not is_self_issued else Decimal("0.00")
 
         return cls(
             rnc_cedula=rnc_cedula,

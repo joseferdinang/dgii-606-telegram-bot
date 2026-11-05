@@ -309,4 +309,14 @@ class LLMFieldExtractor:
                 except (ValueError, TypeError):
                     pass
 
+        try:
+            tot = float(normalized.get("monto_total") or 0)
+            srv = float(normalized.get("monto_servicios") or 0)
+            bns = float(normalized.get("monto_bienes") or 0)
+            if tot > 0 and srv == 0 and bns == 0:
+                normalized.pop("monto_servicios", None)
+                normalized.pop("monto_bienes", None)
+        except (ValueError, TypeError):
+            pass
+
         return normalized

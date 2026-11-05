@@ -165,8 +165,8 @@ class InvoiceOCREngine:
 
         # Consolidar: header fields de la primera página que los tenga,
         # footer fields de la última que los tenga.
-        header_fields = ["rnc_cedula", "ncf", "fecha_comprobante"]
-        footer_fields = ["monto_total", "itbis_facturado"]
+        header_fields = ["rnc_cedula", "rnc_comprador", "ncf", "fecha_comprobante"]
+        footer_fields = ["monto_total", "itbis_facturado", "monto_propina_legal", "impuesto_selectivo_consumo"]
         secondary_fields = ["moneda", "tasa_cambio", "forma_pago", 
                             "voucher_procesador", "voucher_tipo_tarjeta", "voucher_ultimos4"]
 
@@ -406,10 +406,13 @@ class InvoiceOCREngine:
         result: dict[str, Optional[FieldConfidence]] = {}
 
         result["rnc_cedula"] = self._extract_rnc_cedula(text, buyer_rnc=buyer_rnc)
+        result["rnc_comprador"] = self._extract_rnc_comprador(text)
         result["ncf"] = self._extract_ncf(text)
         result["fecha_comprobante"] = self._extract_fecha(text)
         result["monto_total"] = self._extract_monto(text)
         result["itbis_facturado"] = self._extract_itbis(text)
+        result["monto_propina_legal"] = self._extract_propina_legal(text)
+        result["impuesto_selectivo_consumo"] = self._extract_isc(text)
         result["moneda"] = self._extract_currency(text)               # 'USD' o 'DOP'
         result["tasa_cambio"] = self._extract_tasa_cambio(text)       # None si no en la factura
         result["forma_pago"] = self._extract_forma_pago(text)         # código 01-07
@@ -492,6 +495,22 @@ class InvoiceOCREngine:
             confidence = min(0.95 if (best_labeled and best_chk) else (0.85 if best_chk else (0.7 if best_labeled else 0.5)), 1.0)
             return FieldConfidence(value=best_digits, confidence=confidence, source="labeled" if best_labeled else "pattern")
 
+        return None
+
+    @staticmethod
+    def _extract_rnc_comprador(text: str) -> Optional[FieldConfidence]:
+        """Extrae explícitamente el RNC/Cédula del comprador/cliente si aparece etiquetado en la factura."""
+        m = re.search(
+            r"(?:RNC\s+(?:DEL\s+)?(?:CLIENTE|COMPRADOR|RECEPTOR)|"
+            r"(?:CLIENTE|COMPRADOR|RECEPTOR)\s*[:.#\-]?\s*RNC)"
+            r"\s*[:.#\-]?\s*([\d]{3}[\-\s]?[\d]{5,7}[\-\s]?[\d]{1})",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            digits = re.sub(r"\D", "", m.group(1))
+            if len(digits) in (9, 11):
+                return FieldConfidence(value=digits, confidence=0.9, source="labeled")
         return None
 
     @staticmethod
@@ -822,6 +841,46 @@ class InvoiceOCREngine:
             if val:
                 return FieldConfidence(value=val, confidence=0.6, source="pattern")
 
+        return None
+
+    @classmethod
+    def _extract_propina_legal(cls, text: str) -> Optional[FieldConfidence]:
+        """Extrae la Propina Legal (10% Ley 54-32) cuando figura en la factura."""
+        _CUR = r"(?:RD\s*\$|US\s*\$|DOP|USD|\$)?\s*"
+        _SEP = r"\s*[:.#\-]?\s*"
+        _AMT = r"([\d][\d.,]+)"
+        patterns = [
+            r"PROPINA\s+LEGAL(?:\s*\(?\s*10\s*%?\s*\)?)?",
+            r"10\s*%\s*(?:DE\s+)?PROPINA(?:\s+LEGAL)?",
+            r"LEY\s+PROPINA",
+            r"PROPINA\s*\(?\s*10\s*%\s*\)?",
+            r"LEGAL\s+TIP(?:\s*10\s*%)?",
+        ]
+        for pat in patterns:
+            m = re.search(rf"(?:{pat}){_SEP}{_CUR}{_AMT}", text, re.IGNORECASE)
+            if m:
+                val = cls._normalize_amount(m.group(1))
+                if val and float(val) > 0:
+                    return FieldConfidence(value=val, confidence=0.9, source="labeled")
+        return None
+
+    @classmethod
+    def _extract_isc(cls, text: str) -> Optional[FieldConfidence]:
+        """Extrae el Impuesto Selectivo al Consumo (ISC / Telecom 10% / Seguros 16%)."""
+        _CUR = r"(?:RD\s*\$|US\s*\$|DOP|USD|\$)?\s*"
+        _SEP = r"\s*[:.#\-]?\s*"
+        _AMT = r"([\d][\d.,]+)"
+        patterns = [
+            r"IMPUESTO\s+SELECTIVO(?:\s+AL\s+CONSUMO)?",
+            r"\bI\.?S\.?C\.?\b(?:\s*\(?\s*\d+\s*%?\s*\)?)?",
+            r"SELECTIVO\s+AL\s+CONSUMO",
+        ]
+        for pat in patterns:
+            m = re.search(rf"(?:{pat}){_SEP}{_CUR}{_AMT}", text, re.IGNORECASE)
+            if m:
+                val = cls._normalize_amount(m.group(1))
+                if val and float(val) > 0:
+                    return FieldConfidence(value=val, confidence=0.9, source="labeled")
         return None
 
     # ------------------------------------------------------------------

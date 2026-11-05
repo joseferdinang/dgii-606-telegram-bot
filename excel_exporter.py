@@ -7,17 +7,11 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
-try:
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-except ImportError:
-    Workbook = Alignment = Border = Font = PatternFill = Side = None
-try:
-    from openpyxl.worksheet.table import Table, TableStyleInfo
-except ImportError:
-    Table = TableStyleInfo = None
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from fiscal_validators import infer_tipo_id, normalize_amount, normalize_date
+from fiscal_validators import decimal_text, infer_tipo_id, normalize_amount, normalize_date
 
 
 SHEET_NAME = "606"
@@ -77,7 +71,7 @@ class Excel606Exporter:
 
         self._write_headers(sheet)
         for line_number, invoice in enumerate(invoices, start=1):
-            sheet.append(self._row(line_number, invoice))
+            sheet.append(self._row(line_number, invoice, reporting_rnc=reporting_rnc))
 
         end_row = len(invoices) + 1
         table = Table(displayName="Formato606", ref=f"A1:Z{end_row}")
@@ -99,17 +93,20 @@ class Excel606Exporter:
     def _money(invoice: dict, field: str) -> Decimal:
         return normalize_amount(invoice.get(field), allow_empty=True) or Decimal("0.00")
 
-    def _row(self, line_number: int, invoice: dict) -> list:
+    def _row(self, line_number: int, invoice: dict, *, reporting_rnc: str | None = None) -> list:
         invoice_date = normalize_date(invoice["fecha_comprobante"])
         payment_date = normalize_date(invoice["fecha_pago"]) if invoice.get("fecha_pago") else ""
         services = self._money(invoice, "monto_servicios")
         goods = self._money(invoice, "monto_bienes")
         itbis = self._money(invoice, "itbis_facturado")
         cost_itbis = self._money(invoice, "itbis_llevado_costo")
+        raw_ncf = str(invoice.get("ncf", "")).upper()
+        is_self_issued = raw_ncf.startswith(("B17", "E47", "B13", "E43"))
+        effective_rnc = str(reporting_rnc if (is_self_issued and reporting_rnc) else invoice["rnc_cedula"])
         return [
             line_number,
-            str(invoice["rnc_cedula"]),
-            str(invoice.get("tipo_id") or infer_tipo_id(invoice["rnc_cedula"])),
+            effective_rnc,
+            str(infer_tipo_id(effective_rnc) if is_self_issued else (invoice.get("tipo_id") or infer_tipo_id(effective_rnc))),
             str(invoice["tipo_bienes_servicios"]),
             str(invoice["ncf"]),
             str(invoice.get("ncf_modificado", "")),

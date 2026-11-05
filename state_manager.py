@@ -197,6 +197,10 @@ class StateManager:
                         """
                     )
 
+            cols_sm_after = [c["name"] for c in connection.execute("PRAGMA table_info(supplier_memory)").fetchall()]
+            if "tipo_asignacion" not in cols_sm_after:
+                connection.execute("ALTER TABLE supplier_memory ADD COLUMN tipo_asignacion TEXT NOT NULL DEFAULT ''")
+
             # Migración de columna company_rnc en sessions si no existía
             cols_sess = [c["name"] for c in connection.execute("PRAGMA table_info(sessions)").fetchall()]
             if "company_rnc" not in cols_sess:
@@ -686,38 +690,46 @@ class StateManager:
         tipo_bienes_servicios: str,
         forma_pago: str,
         company_rnc: str = "",
+        tipo_asignacion: str = "",
     ) -> None:
-        comp_scope = normalize_rnc(company_rnc)
+        comp_scope = normalize_rnc(company_rnc) if company_rnc else ""
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO supplier_memory (company_rnc, rnc_cedula, tipo_bienes_servicios, forma_pago)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO supplier_memory (company_rnc, rnc_cedula, tipo_bienes_servicios, forma_pago, tipo_asignacion)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(company_rnc, rnc_cedula) DO UPDATE SET
                     tipo_bienes_servicios=excluded.tipo_bienes_servicios,
                     forma_pago=excluded.forma_pago,
+                    tipo_asignacion=CASE
+                        WHEN excluded.tipo_asignacion != '' THEN excluded.tipo_asignacion
+                        ELSE supplier_memory.tipo_asignacion
+                    END,
                     updated_at=CURRENT_TIMESTAMP
                 """,
-                (comp_scope, rnc_cedula, tipo_bienes_servicios, forma_pago),
+                (comp_scope, rnc_cedula, tipo_bienes_servicios, forma_pago, tipo_asignacion or ""),
             )
 
     def get_supplier_memory(self, rnc_cedula: str, company_rnc: str = "") -> dict[str, str]:
-        comp_scope = normalize_rnc(company_rnc)
+        comp_scope = normalize_rnc(company_rnc) if company_rnc else ""
         with self._connection() as conn:
+            row = None
             if comp_scope:
                 row = conn.execute(
-                    "SELECT tipo_bienes_servicios, forma_pago FROM supplier_memory WHERE company_rnc = ? AND rnc_cedula = ?",
+                    "SELECT tipo_bienes_servicios, forma_pago, tipo_asignacion FROM supplier_memory WHERE company_rnc = ? AND rnc_cedula = ?",
                     (comp_scope, rnc_cedula),
                 ).fetchone()
-                if row:
-                    return {"tipo_bienes_servicios": row["tipo_bienes_servicios"], "forma_pago": row["forma_pago"]}
-            # Fallback genérico si no había registro bajo la empresa específica
-            row = conn.execute(
-                "SELECT tipo_bienes_servicios, forma_pago FROM supplier_memory WHERE company_rnc = '' AND rnc_cedula = ?",
-                (rnc_cedula,),
-            ).fetchone()
+            if not row:
+                # Fallback genérico si no había registro bajo la empresa específica
+                row = conn.execute(
+                    "SELECT tipo_bienes_servicios, forma_pago, tipo_asignacion FROM supplier_memory WHERE company_rnc = '' AND rnc_cedula = ?",
+                    (rnc_cedula,),
+                ).fetchone()
         if row:
-            return {"tipo_bienes_servicios": row["tipo_bienes_servicios"], "forma_pago": row["forma_pago"]}
+            res = {"tipo_bienes_servicios": row["tipo_bienes_servicios"], "forma_pago": row["forma_pago"]}
+            if row["tipo_asignacion"]:
+                res["tipo_asignacion"] = row["tipo_asignacion"]
+            return res
         return {}
 
     def delete_invoice_from_batch(self, chat_id: int, ncf: str, rnc: str | None = None) -> bool:

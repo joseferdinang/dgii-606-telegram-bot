@@ -117,6 +117,24 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
     if raw_text:
         fields["_raw_text"] = raw_text
 
+    # Verificar si la factura trae RNC Comprador y compararlo con la empresa activa
+    rnc_comprador = str(fields.get("rnc_comprador") or "").strip()
+    if rnc_comprador and active_company and rnc_comprador != active_company.rnc:
+        fields["_buyer_rnc_mismatch"] = f"{rnc_comprador} (Empresa activa: {active_company.rnc})"
+        if target_msg:
+            await target_msg.reply_text(
+                f"⚠️ Atención: La factura indica como comprador el RNC {rnc_comprador}, "
+                f"que no coincide con tu empresa activa ({active_company.razon_social} - RNC {active_company.rnc}). "
+                "Verifica que este comprobante corresponda a esta empresa antes de confirmarlo."
+            )
+
+    # Si la factura está en USD y ya trae tasa de cambio impresa, convertir montos a DOP automáticamente
+    if fields.get("moneda") == "USD" and fields.get("tasa_cambio") and not missing:
+        from handlers.exchange_rate_handler import _parse_rate, apply_usd_exchange_rate
+        parsed_rate = _parse_rate(str(fields["tasa_cambio"]))
+        if parsed_rate is not None:
+            apply_usd_exchange_rate(fields, parsed_rate)
+
     state_manager.save_extracted_data(chat_id, fields, missing, company_rnc=buyer_rnc or "")
     if missing:
         logger.info("Campos OCR pendientes de corrección para chat_id=%s: %s", chat_id, missing)
