@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import os
 import re
 from typing import Any
+import unicodedata
 
 
 MONEY_QUANTUM = Decimal("0.01")
@@ -59,7 +60,8 @@ class ValidationIssue:
 
 
 def _clean_digits(value: Any) -> str:
-    return re.sub(r"\D", "", str(value or ""))
+    cleaned = unicodedata.normalize("NFKC", str(value or ""))
+    return re.sub(r"\D", "", cleaned)
 
 
 def calc_rnc_check_digit(number_8: str) -> str:
@@ -146,7 +148,8 @@ def infer_tipo_id(rnc_cedula: Any) -> str:
 
 def normalize_ncf(value: Any, *, allow_non_606: bool = False) -> str:
     """Validate a paper NCF (B + 10 digits) or e-CF (E + 12 digits) for Form 606."""
-    ncf = re.sub(r"[\s._-]", "", str(value or "")).upper()
+    raw = unicodedata.normalize("NFKC", str(value or ""))
+    ncf = re.sub(r"[\s._-]", "", raw).upper()
     if NCF_606_PATTERN.fullmatch(ncf) or ECF_606_PATTERN.fullmatch(ncf):
         return ncf
 
@@ -177,15 +180,27 @@ def ncf_type(value: Any) -> str:
 
 def normalize_date(value: Any) -> str:
     """Normalise common manual date formats to the DGII YYYYMMDD representation."""
-    raw = str(value or "").strip()
+    raw = unicodedata.normalize("NFKC", str(value or "")).strip()
     if DATE_PATTERN.fullmatch(raw):
         candidate = raw
-    else:
-        match = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", raw)
-        if not match:
-            raise ValueError("La fecha debe tener formato DD/MM/AAAA o AAAAMMDD.")
-        day, month, year = (int(part) for part in match.groups())
+    elif re.fullmatch(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", raw):
+        # Formato ISO: YYYY-MM-DD o YYYY/MM/DD
+        m = re.fullmatch(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", raw)
+        year, month, day = (int(part) for part in m.groups())
         candidate = f"{year:04d}{month:02d}{day:02d}"
+    elif re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", raw):
+        # Formato estándar: DD/MM/AAAA o DD-MM-AAAA
+        m = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", raw)
+        day, month, year = (int(part) for part in m.groups())
+        candidate = f"{year:04d}{month:02d}{day:02d}"
+    elif re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2})", raw):
+        # Formato corto: DD/MM/AA o DD-MM-AA
+        m = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2})", raw)
+        day, month, yy = (int(part) for part in m.groups())
+        year = 2000 + yy if yy < 50 else 1900 + yy
+        candidate = f"{year:04d}{month:02d}{day:02d}"
+    else:
+        raise ValueError("La fecha debe tener formato DD/MM/AAAA, AAAA-MM-DD o AAAAMMDD.")
 
     try:
         parsed = datetime.strptime(candidate, "%Y%m%d").date()
@@ -204,7 +219,7 @@ def as_date(value: Any) -> date:
 
 def normalize_amount(value: Any, *, allow_empty: bool = False) -> Decimal | None:
     """Parse an amount safely, accepting Dominican and international separators."""
-    raw = str(value or "").strip().replace("RD$", "").replace("US$", "")
+    raw = unicodedata.normalize("NFKC", str(value or "")).strip().replace("RD$", "").replace("US$", "")
     raw = raw.replace("DOP", "").replace("USD", "").replace("$", "").strip()
     raw = raw.replace(" ", "")
     if not raw:
@@ -220,12 +235,17 @@ def normalize_amount(value: Any, *, allow_empty: bool = False) -> Decimal | None
         raw = raw.replace(",", "")
 
     try:
-        amount = Decimal(raw).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+        amount = Decimal(raw)
+        if amount.is_nan() or amount.is_infinite():
+            raise ValueError("El monto debe ser un número válido.")
+        amount = amount.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+        if amount < 0 or amount > MAX_AMOUNT:
+            raise ValueError("El monto debe estar entre 0.00 y 999,999,999,999.99.")
     except (InvalidOperation, ValueError) as exc:
+        if isinstance(exc, ValueError) and "entre 0.00 y" in str(exc):
+            raise
         raise ValueError("El monto debe ser un número válido con hasta dos decimales.") from exc
 
-    if amount < 0 or amount > MAX_AMOUNT:
-        raise ValueError("El monto debe estar entre 0.00 y 999,999,999,999.99.")
     return amount
 
 

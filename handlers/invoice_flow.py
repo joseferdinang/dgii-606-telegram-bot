@@ -114,6 +114,22 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
                 parse_mode="Markdown",
             )
 
+    # Advertencia si la factura ya está en el lote actual
+    if fields.get("ncf") and state_manager.has_invoice(chat_id, fields, rnc=buyer_rnc):
+        if target_msg:
+            await target_msg.reply_text(
+                f"⚠️ *Atención:* El NCF `{fields['ncf']}` ya se encuentra registrado en el lote actual.",
+                parse_mode="Markdown",
+            )
+
+    # Advertencia si la imagen tiene problemas de nitidez o resolución
+    if fields.get("_quality_warning") and target_msg:
+        await target_msg.reply_text(
+            f"⚠️ *Calidad de imagen:* {fields['_quality_warning']}\n"
+            "Verifica con especial cuidado los números extraídos antes de confirmar.",
+            parse_mode="Markdown",
+        )
+
     if raw_text:
         fields["_raw_text"] = raw_text
 

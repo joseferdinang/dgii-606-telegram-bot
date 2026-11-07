@@ -136,6 +136,10 @@ def _effective_itbis_label(fields: dict) -> str:
 def _format_preview_text(fields: dict) -> str:
     from decimal import Decimal
     lines = ["Revisa la factura antes de añadirla al lote 606:"]
+    if fields.get("_quality_warning"):
+        lines.append(f"⚠️ Calidad de imagen: {fields['_quality_warning']}")
+    if fields.get("_accounting_warning"):
+        lines.append(f"⚠️ Alerta contable: {fields['_accounting_warning']}")
     if fields.get("_buyer_rnc_mismatch"):
         lines.append(f"⚠️ Alerta RNC Comprador: {fields['_buyer_rnc_mismatch']}")
     lines.extend([
@@ -595,6 +599,9 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
     except DuplicateInvoiceError:
         await query.edit_message_text("Ese NCF ya se encuentra en el lote actual.")
         await _request_manual_fields(update, chat_id, ["ncf"], "Indica el NCF correcto.")
+        return
+    except ValueError as exc:
+        await query.edit_message_text(f"⚠️ {exc}\nUsa /terminar para exportar el lote actual antes de comenzar facturas de otro período.")
         return
     except Exception:
         logger.exception("No fue posible persistir la factura confirmada", extra={"chat_id": chat_id})

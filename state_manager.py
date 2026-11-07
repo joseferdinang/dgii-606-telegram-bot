@@ -629,16 +629,33 @@ class StateManager:
 
     @staticmethod
     def _invoice_key(data: dict) -> str:
-        return f"{data['rnc_cedula']}:{data['ncf']}"
+        rnc = str(data.get("rnc_cedula", "")).strip()
+        ncf = str(data.get("ncf", "")).strip().upper()
+        return f"{rnc}:{ncf}"
 
     def add_confirmed_invoice(self, chat_id: int, data: dict, rnc: str | None = None) -> int:
         rnc_scope = self._resolve_rnc(chat_id, rnc)
-        invoice_key = self._invoice_key(data)
+        clean_data = dict(data)
+        if clean_data.get("ncf"):
+            clean_data["ncf"] = str(clean_data["ncf"]).strip().upper()
+        if clean_data.get("ncf_modificado"):
+            clean_data["ncf_modificado"] = str(clean_data["ncf_modificado"]).strip().upper()
+
+        # Validar consistencia de período en el lote
+        existing_period = self.batch_period(chat_id, rnc=rnc_scope)
+        inv_date = str(clean_data.get("fecha_comprobante", "")).strip()
+        inv_period = inv_date[:6] if len(inv_date) >= 6 else None
+        if existing_period and inv_period and existing_period != inv_period:
+            raise ValueError(
+                f"El lote actual es del período fiscal {existing_period}, pero esta factura corresponde a {inv_period}."
+            )
+
+        invoice_key = self._invoice_key(clean_data)
         with self._connection() as connection:
             try:
                 cursor = connection.execute(
                     "INSERT INTO batch_invoices(chat_id, rnc, invoice_key, payload) VALUES (?, ?, ?, ?)",
-                    (chat_id, rnc_scope, invoice_key, json.dumps(data, ensure_ascii=False)),
+                    (chat_id, rnc_scope, invoice_key, json.dumps(clean_data, ensure_ascii=False)),
                 )
             except sqlite3.IntegrityError as exc:
                 raise DuplicateInvoiceError("Ese NCF ya está incluido en el lote actual.") from exc
@@ -650,14 +667,19 @@ class StateManager:
             return False
         
         rnc_scope = self._resolve_rnc(chat_id, rnc)
-        data_for_key = dict(extracted_data)
-        data_for_key["ncf"] = ncf
-        invoice_key = self._invoice_key(data_for_key)
+        clean_ncf = str(ncf).strip().upper()
+        vendor_rnc = str(extracted_data.get("rnc_cedula") or "").strip()
         with self._connection() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM batch_invoices WHERE chat_id = ? AND rnc = ? AND invoice_key = ?",
-                (chat_id, rnc_scope, invoice_key),
-            ).fetchone()
+            if vendor_rnc:
+                row = connection.execute(
+                    "SELECT 1 FROM batch_invoices WHERE chat_id = ? AND rnc = ? AND invoice_key = ?",
+                    (chat_id, rnc_scope, f"{vendor_rnc}:{clean_ncf}"),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT 1 FROM batch_invoices WHERE chat_id = ? AND rnc = ? AND invoice_key LIKE ?",
+                    (chat_id, rnc_scope, f"%:{clean_ncf}"),
+                ).fetchone()
         return row is not None
 
     def get_batch(self, chat_id: int, rnc: str | None = None) -> list[dict]:

@@ -114,6 +114,8 @@ class InvoiceOCREngine:
             if img.shape[1] > img.shape[0]:
                 img_rot = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
                 res, _ = ocr(img_rot)
+                if res:
+                    img = img_rot
             else:
                 res, _ = ocr(img)
 
@@ -129,9 +131,27 @@ class InvoiceOCREngine:
                         vert += 1
             if vert > len(res) * 0.3:
                 img_rot = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-                res, _ = ocr(img_rot)
-                if not res:
-                    return ""
+                res_rot, _ = ocr(img_rot)
+                if res_rot:
+                    res = res_rot
+                    img = img_rot
+
+            # Detección y corrección automática de imagen invertida 180°
+            header_ys = [
+                float(np.mean(np.array(box)[:, 1]))
+                for box, txt, _ in res
+                if any(k in txt.upper() for k in ["NCF", "RNC", "FACTURA", "COMPROBANTE", "DGII"])
+            ]
+            footer_ys = [
+                float(np.mean(np.array(box)[:, 1]))
+                for box, txt, _ in res
+                if any(k in txt.upper() for k in ["TOTAL", "PAGAR", "TARJETA", "EFECTIVO", "CAMBIO", "SUBTOTAL"])
+            ]
+            if header_ys and footer_ys and np.mean(header_ys) > np.mean(footer_ys):
+                img_180 = cv2.rotate(img, cv2.ROTATE_180)
+                res_180, _ = ocr(img_180)
+                if res_180:
+                    res = res_180
 
             items = []
             for box, txt, _ in res:
@@ -169,8 +189,37 @@ class InvoiceOCREngine:
     # Puntos de entrada públicos
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def check_image_quality(image_bytes: bytes) -> tuple[bool, str]:
+        """
+        Evalúa la nitidez y resolución mínima de la imagen antes del OCR.
+        Retorna (es_aceptable, advertencia_si_falla).
+        """
+        if not image_bytes or len(image_bytes) < 30:
+            return False, "Archivo vacío o no es una imagen válida."
+        try:
+            import cv2
+            import numpy as np
+            np_arr = np.frombuffer(image_bytes, np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if img is None:
+                return False, "No se pudo decodificar el formato de la imagen."
+            h, w = img.shape[:2]
+            if min(h, w) < 180:
+                return False, f"Resolución muy reducida ({w}x{h} px). Los números pequeños del recibo podrían ser ilegibles."
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            if var < 15.0:
+                return False, f"La foto está muy borrosa o desenfocada (nitidez: {var:.1f})."
+            return True, ""
+        except Exception:
+            return True, ""
+
     def analyze(self, image_bytes: bytes, buyer_rnc: Optional[str] = None) -> OCRResult:
         """Punto de entrada para imágenes (JPEG/PNG). bytes → OCRResult estructurado."""
+        # 0. Evaluación de calidad preventiva (nitidez y resolución)
+        is_ok, quality_msg = self.check_image_quality(image_bytes)
+
         # 1. Intentar decodificar código QR de factura electrónica DGII (e-CF)
         qr_fields = None
         try:
@@ -193,6 +242,9 @@ class InvoiceOCREngine:
         result = self._build_result(raw_text, image_bytes, buyer_rnc=buyer_rnc)
         result.image_bytes = image_bytes
 
+        if not is_ok and quality_msg:
+            result.fields["_quality_warning"] = quality_msg
+
         # Si se detectó QR de la DGII, los campos del QR tienen prioridad máxima (confianza 1.0)
         if qr_fields:
             is_usd = result.fields.get("moneda") == "USD" and bool(result.fields.get("monto_total"))
@@ -207,6 +259,31 @@ class InvoiceOCREngine:
                 result.confidence["itbis_facturado"] = 0.9
             result.missing_fields = [f for f in REQUIRED_FIELDS if not result.fields.get(f)]
             logger.info("Campos QR DGII aplicados con éxito: %s", list(qr_fields.keys()))
+
+        # Validaciones de coherencia contable y banderas de alerta preventiva
+        tot_val = result.fields.get("monto_total")
+        itb_val = result.fields.get("itbis_facturado")
+        if tot_val and itb_val:
+            try:
+                tot_f = float(tot_val)
+                itb_f = float(itb_val)
+                if tot_f > 0:
+                    if itb_f > tot_f:
+                        result.fields["_accounting_warning"] = (
+                            f"El ITBIS ({itb_f:.2f}) es mayor que el monto total ({tot_f:.2f})."
+                        )
+                    elif itb_f > (tot_f * 0.25):
+                        result.fields["_accounting_warning"] = (
+                            f"El ITBIS ({itb_f:.2f}) supera el 25% del total. La tasa fiscal regular DGII es 18%."
+                        )
+                if tot_f > 500000.0:
+                    warn = "Monto inusualmente alto (> RD$500,000.00). Revisa posibles ceros adicionales."
+                    result.fields["_accounting_warning"] = (
+                        f"{result.fields['_accounting_warning']} | {warn}"
+                        if "_accounting_warning" in result.fields else warn
+                    )
+            except ValueError:
+                pass
 
         return result
 
@@ -885,7 +962,11 @@ class InvoiceOCREngine:
           - Artefacto OCR doble punto:    1.200.00  → 1200.00
           - Sin separador de miles:       1234.56   → 1234.56
         """
+        if not raw or not isinstance(raw, str):
+            return None
         raw = raw.strip().replace(" ", "")
+        if not raw:
+            return None
         # Formato europeo: punto como miles, coma como decimal
         if re.match(r"^\d{1,3}(\.\d{3})*(,\d{2})$", raw):
             raw = raw.replace(".", "").replace(",", ".")

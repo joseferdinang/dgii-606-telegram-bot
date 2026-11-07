@@ -156,8 +156,7 @@ def extract_qr_from_image_bytes(image_bytes: bytes) -> Tuple[Optional[str], Opti
     Decodes QR code from raw image bytes and parses any DGII e-CF payload.
     Returns (raw_qr_text, dgii_fields_dict).
     """
-    if cv2 is None or np is None:
-        logger.debug("OpenCV or NumPy not available for image QR detection")
+    if cv2 is None or np is None or not image_bytes or len(image_bytes) < 30:
         return None, None
     try:
         np_arr = np.frombuffer(image_bytes, np.uint8)

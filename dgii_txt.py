@@ -97,6 +97,8 @@ class Record606:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], reporting_rnc: Optional[str] = None) -> Record606:
+        if not data.get("ncf"):
+            raise ValueError("El comprobante no contiene NCF.")
         raw_ncf = normalize_ncf(data["ncf"])
         # B17/E47 (Pagos al Exterior) y B13/E43 (Gastos Menores) son auto-emitidos con el RNC del declarante
         is_self_issued = raw_ncf.startswith(("B17", "E47", "B13", "E43"))
@@ -107,15 +109,17 @@ class Record606:
             rnc_cedula = normalize_identifier(reporting_rnc)
             tipo_id = TipoId(infer_tipo_id(rnc_cedula))
         else:
+            if not data.get("rnc_cedula"):
+                raise ValueError("El comprobante no contiene RNC o Cédula.")
             rnc_cedula = normalize_identifier(data["rnc_cedula"])
             tipo_id = TipoId(str(data.get("tipo_id") or infer_tipo_id(rnc_cedula)))
 
         # Categoría
-        cat_str = str(data["tipo_bienes_servicios"]).zfill(2)
+        cat_str = str(data.get("tipo_bienes_servicios", "02")).zfill(2)
         tipo_bs = TipoBienesServicios(cat_str)
 
         # Forma de pago
-        fp_str = str(data["forma_pago"]).zfill(2)
+        fp_str = str(data.get("forma_pago", "01")).zfill(2)
         forma_pago = FormaPago(fp_str)
 
         # NCF modificado
@@ -124,6 +128,8 @@ class Record606:
             ncf_mod = normalize_ncf(data["ncf_modificado"])
 
         # Fechas
+        if not data.get("fecha_comprobante"):
+            raise ValueError("El comprobante no contiene fecha_comprobante.")
         fecha_comp = normalize_date(data["fecha_comprobante"])
         fecha_pago = normalize_date(data["fecha_pago"]) if data.get("fecha_pago") else ""
 
@@ -228,7 +234,10 @@ def generate_606_txt(
         )
 
     norm_reporting_rnc = normalize_identifier(reporting_rnc)
-    first_date = normalize_date(invoices[0]["fecha_comprobante"])
+    first_date_val = invoices[0].get("fecha_comprobante")
+    if not first_date_val:
+        raise ValueError("La primera factura del lote no contiene 'fecha_comprobante' para determinar el período fiscal.")
+    first_date = normalize_date(first_date_val)
     detected_period = period or first_date[:6]
 
     records = [Record606.from_dict(inv, reporting_rnc=norm_reporting_rnc) for inv in invoices]
