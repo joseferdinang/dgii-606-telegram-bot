@@ -91,6 +91,20 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
         field for field in REQUIRED_FIELDS if not fields.get(field)
     ] + invalid_fields))
 
+    # Rechazar imágenes ilegibles, corruptas, en blanco o sin ningún campo fiscal válido
+    if fields.get("_rejected_quality") or len(missing) == len(REQUIRED_FIELDS):
+        state_manager.clear_session(chat_id)
+        if target_msg:
+            reason = fields.get("_quality_warning") or "No se detectaron datos fiscales legibles en la imagen."
+            await target_msg.reply_text(
+                f"❌ *Imagen descartada:* {reason}\n\n"
+                "Por favor envía una foto más nítida y completa de la factura, o un documento PDF legible.",
+                parse_mode="Markdown",
+            )
+        from handlers.queue_handler import process_next_queued_media
+        await process_next_queued_media(update, context)
+        return
+
     existing_period = state_manager.batch_period(chat_id, rnc=buyer_rnc)
     new_period = str(fields.get("fecha_comprobante", ""))[:6]
     if existing_period and new_period and existing_period != new_period:
@@ -121,14 +135,6 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"⚠️ *Atención:* El NCF `{fields['ncf']}` ya se encuentra registrado en el lote actual.",
                 parse_mode="Markdown",
             )
-
-    # Advertencia si la imagen tiene problemas de nitidez o resolución
-    if fields.get("_quality_warning") and target_msg:
-        await target_msg.reply_text(
-            f"⚠️ *Calidad de imagen:* {fields['_quality_warning']}\n"
-            "Verifica con especial cuidado los números extraídos antes de confirmar.",
-            parse_mode="Markdown",
-        )
 
     if raw_text:
         fields["_raw_text"] = raw_text

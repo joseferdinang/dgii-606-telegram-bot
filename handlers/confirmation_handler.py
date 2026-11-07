@@ -123,10 +123,12 @@ def _effective_itbis_label(fields: dict) -> str:
             return " (Exento 0%)"
         if base > Decimal("0"):
             pct = float((itbis / base) * Decimal("100"))
-            if abs(pct - 18.0) <= 0.6:
+            if abs(pct - 18.0) <= 0.25:
                 return " (18%)"
-            if abs(pct - 16.0) <= 0.6:
+            if abs(pct - 16.0) <= 0.25:
                 return " (16% - Tasa reducida)"
+            if abs(pct - 10.0) <= 0.25:
+                return " (10%)"
             return f" ({pct:.1f}% efectivo - Mixto/Parcial)"
     except ValueError:
         pass
@@ -544,6 +546,9 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
         was_corrected = session.extracted_data.pop("_was_corrected", False)
         session.extracted_data.pop("_buyer_rnc_mismatch", None)
         session.extracted_data.pop("_usd_converted", None)
+        session.extracted_data.pop("_quality_warning", None)
+        session.extracted_data.pop("_accounting_warning", None)
+        session.extracted_data.pop("_rejected_quality", None)
 
         active_company = state_manager.get_active_company(chat_id)
         comp_rnc = active_company.rnc if active_company else None
