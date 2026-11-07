@@ -3,6 +3,8 @@ python-telegram-bot==21.*
 
 # OCR, Computer Vision & QR
 google-cloud-vision
+rapidocr-onnxruntime
+zxing-cpp
 Pillow
 pdf2image
 opencv-python-headless

@@ -72,6 +72,10 @@ EXTRACTION_SCHEMA = {
             "type": ["string", "null"],
             "description": "RNC (9 dígitos) o Cédula (11 dígitos) del emisor/proveedor sin guiones.",
         },
+        "rnc_comprador": {
+            "type": ["string", "null"],
+            "description": "RNC (9 dígitos) o Cédula (11 dígitos) del cliente/comprador si aparece en la factura.",
+        },
         "ncf": {
             "type": ["string", "null"],
             "description": "NCF oficial emitido por el vendedor (ej. B0100000001 o E310000000001).",
@@ -93,19 +97,19 @@ EXTRACTION_SCHEMA = {
             "description": "Monto total pagado o facturado con impuestos incluidos.",
         },
         "monto_servicios": {
-            "type": "number",
+            "type": ["number", "null"],
             "description": "Monto neto en servicios sin ITBIS.",
         },
         "monto_bienes": {
-            "type": "number",
+            "type": ["number", "null"],
             "description": "Monto neto en bienes físicos sin ITBIS.",
         },
         "itbis_facturado": {
-            "type": "number",
+            "type": ["number", "null"],
             "description": "Total ITBIS facturado.",
         },
         "itbis_retenido": {
-            "type": "number",
+            "type": ["number", "null"],
             "description": "Monto de ITBIS retenido si aplica.",
         },
         "tipo_bienes_servicios": {
@@ -117,20 +121,20 @@ EXTRACTION_SCHEMA = {
             "description": "Código de 2 dígitos (01 a 07) del método de pago.",
         },
         "monto_propina_legal": {
-            "type": "number",
+            "type": ["number", "null"],
             "description": "Monto de propina legal (10% restaurantes).",
         },
         "impuesto_selectivo_consumo": {
-            "type": "number",
+            "type": ["number", "null"],
             "description": "ISC si aplica.",
         },
         "otros_impuestos_tasas": {
-            "type": "number",
+            "type": ["number", "null"],
             "description": "Otros impuestos o tasas.",
         },
         "moneda": {
-            "type": "string",
-            "enum": ["DOP", "USD"],
+            "type": ["string", "null"],
+            "enum": ["DOP", "USD", None],
             "description": "Moneda de la factura.",
         },
         "tasa_cambio": {
@@ -139,14 +143,24 @@ EXTRACTION_SCHEMA = {
         },
     },
     "required": [
+        "rnc_cedula",
+        "rnc_comprador",
+        "ncf",
+        "ncf_modificado",
+        "fecha_comprobante",
+        "fecha_pago",
+        "monto_total",
         "monto_servicios",
         "monto_bienes",
         "itbis_facturado",
         "itbis_retenido",
+        "tipo_bienes_servicios",
+        "forma_pago",
         "monto_propina_legal",
         "impuesto_selectivo_consumo",
         "otros_impuestos_tasas",
         "moneda",
+        "tasa_cambio",
     ],
     "additionalProperties": False,
 }
@@ -234,7 +248,7 @@ class LLMFieldExtractor:
                                     + (f"\nATENCIÓN: El RNC de la empresa declarante (compradora) es {buyer_rnc}. NO extraigas este RNC como proveedor; extrae el del emisor/vendedor." if buyer_rnc else "")
                                 ),
                             },
-                            {"type": "image_url", "image_url": {"url": image_url}},
+                            {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
                         ],
                     },
                 ],
@@ -264,6 +278,9 @@ class LLMFieldExtractor:
 
         if data.get("rnc_cedula"):
             normalized["rnc_cedula"] = str(data["rnc_cedula"]).replace("-", "").strip()
+
+        if data.get("rnc_comprador"):
+            normalized["rnc_comprador"] = str(data["rnc_comprador"]).replace("-", "").strip()
 
         if data.get("ncf"):
             normalized["ncf"] = str(data["ncf"]).upper().strip()

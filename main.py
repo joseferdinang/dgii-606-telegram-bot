@@ -423,6 +423,7 @@ def build_application() -> Application:
     # Comandos generales
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("terminar", cmd_terminar))
+    application.add_handler(CommandHandler("exportar", cmd_terminar))
     application.add_handler(CommandHandler("cancelar", cmd_cancelar))
     application.add_handler(CommandHandler("estado", cmd_estado))
     application.add_handler(CommandHandler("resumen", cmd_resumen))
@@ -449,7 +450,12 @@ def build_application() -> Application:
 
     # Callbacks interactivos
     application.add_handler(CallbackQueryHandler(handle_company_callback, pattern="^(switch_company:.+|logout_active)$"))
-    application.add_handler(CallbackQueryHandler(handle_confirmation_callback, pattern="^(confirm_invoice|correct_invoice)$"))
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_confirmation_callback,
+            pattern="^(confirm_invoice|correct_invoice|realloc_invoice|back_to_preview|correct_field:.+)$",
+        )
+    )
     application.add_handler(CallbackQueryHandler(handle_category_callback, pattern="^cat_\\d{2}$"))
     application.add_handler(CallbackQueryHandler(handle_forma_pago_callback, pattern="^fp_\\d{2}$"))
     application.add_handler(CallbackQueryHandler(handle_allocation_callback, pattern="^alloc_(goods|services|mixed)$"))

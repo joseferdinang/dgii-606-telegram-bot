@@ -164,8 +164,8 @@ def _format_preview_text(fields: dict) -> str:
     return "\n".join(lines)
 
 
-async def send_preview_message(update: Update, context: ContextTypes.DEFAULT_TYPE, fields: dict) -> None:
-    keyboard = InlineKeyboardMarkup(
+def _preview_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton("Confirmar y añadir al lote", callback_data="confirm_invoice"),
@@ -176,7 +176,36 @@ async def send_preview_message(update: Update, context: ContextTypes.DEFAULT_TYP
             ],
         ]
     )
-    await _target_message(update).reply_text(_format_preview_text(fields), reply_markup=keyboard)
+
+
+def _correction_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("RNC / Cédula", callback_data="correct_field:rnc_cedula"),
+                InlineKeyboardButton("NCF / e-CF", callback_data="correct_field:ncf"),
+            ],
+            [
+                InlineKeyboardButton("Fecha", callback_data="correct_field:fecha_comprobante"),
+                InlineKeyboardButton("Total comprobante", callback_data="correct_field:monto_total"),
+            ],
+            [
+                InlineKeyboardButton("ITBIS facturado", callback_data="correct_field:itbis_facturado"),
+                InlineKeyboardButton("Categoría DGII", callback_data="correct_field:tipo_bienes_servicios"),
+            ],
+            [
+                InlineKeyboardButton("Forma de pago", callback_data="correct_field:forma_pago"),
+                InlineKeyboardButton("Bienes / Servicios", callback_data="realloc_invoice"),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Volver", callback_data="back_to_preview"),
+            ],
+        ]
+    )
+
+
+async def send_preview_message(update: Update, context: ContextTypes.DEFAULT_TYPE, fields: dict) -> None:
+    await _target_message(update).reply_text(_format_preview_text(fields), reply_markup=_preview_keyboard())
 
 
 async def _request_manual_fields(update: Update, chat_id: int, fields: list[str], intro: str) -> None:
@@ -359,9 +388,16 @@ async def handle_manual_field_input(update: Update, context: ContextTypes.DEFAUL
     if field_name == "monto_bienes" and session.extracted_data.get("monto_servicios") is not None:
         await show_validation_or_preview(update, context)
         return
-    for allocation_field in ("monto_servicios", "monto_bienes"):
-        session.extracted_data.pop(allocation_field, None)
-    state_manager.update_session(chat_id, session)
+    if field_name in {
+        "monto_total",
+        "itbis_facturado",
+        "impuesto_selectivo_consumo",
+        "otros_impuestos_tasas",
+        "monto_propina_legal",
+    }:
+        for allocation_field in ("monto_servicios", "monto_bienes"):
+            session.extracted_data.pop(allocation_field, None)
+        state_manager.update_session(chat_id, session)
     await proceed_to_next_step(update, context)
 
 async def proceed_to_next_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -443,15 +479,49 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
         if session.state != UserState.WAITING_CONFIRMATION:
             await query.answer("Esta confirmación ya no está activa.", show_alert=True)
             return
-        for field in ("monto_servicios", "monto_bienes"):
-            session.extracted_data.pop(field, None)
+        await query.edit_message_text(
+            f"{_format_preview_text(session.extracted_data)}\n\n✏️ ¿Qué dato de la factura deseas corregir?",
+            reply_markup=_correction_menu_keyboard(),
+        )
+        return
+
+    if query.data == "back_to_preview":
+        if session.state != UserState.WAITING_CONFIRMATION:
+            await query.answer("Esta confirmación ya no está activa.", show_alert=True)
+            return
+        await query.edit_message_text(
+            _format_preview_text(session.extracted_data),
+            reply_markup=_preview_keyboard(),
+        )
+        return
+
+    if query.data and query.data.startswith("correct_field:"):
+        if session.state != UserState.WAITING_CONFIRMATION:
+            await query.answer("Esta confirmación ya no está activa.", show_alert=True)
+            return
+        field_to_fix = query.data.split(":", 1)[1]
         session.extracted_data["_was_corrected"] = True
+        if field_to_fix == "tipo_bienes_servicios":
+            state_manager.update_session(chat_id, session)
+            await query.edit_message_text("Corrigiendo categoría DGII...")
+            await send_category_selection(update, context)
+            return
+        if field_to_fix == "forma_pago":
+            state_manager.update_session(chat_id, session)
+            await query.edit_message_text("Corrigiendo forma de pago...")
+            await send_forma_pago_selection(update, context)
+            return
+        if field_to_fix in ("monto_total", "itbis_facturado"):
+            for alloc_f in ("monto_servicios", "monto_bienes"):
+                session.extracted_data.pop(alloc_f, None)
         state_manager.update_session(chat_id, session)
-        await query.edit_message_text("Indica los datos corregidos uno por uno.")
+        label = FIELD_LABELS.get(field_to_fix, field_to_fix)
+        await query.edit_message_text(f"✏️ Corrigiendo {label}.")
         await _request_manual_fields(
-            update, chat_id,
-            ["rnc_cedula", "ncf", "fecha_comprobante", "monto_total", "itbis_facturado"],
-            "Corrección de factura.",
+            update,
+            chat_id,
+            [field_to_fix],
+            f"Corrección de {label}.",
         )
         return
 

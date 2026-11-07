@@ -58,12 +58,22 @@ def _parse_dgii_params(params: Dict[str, list[str]]) -> Optional[Dict[str, str]]
     fecha = normalized_keys.get("fechaemision") or normalized_keys.get("fechafirma") or normalized_keys.get("fecha")
     fecha_clean = ""
     if fecha:
-        digits = re.sub(r"\D", "", fecha)
-        if len(digits) >= 8:
-            fecha_clean = digits[:8]  # YYYYMMDD
-        elif re.match(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", fecha):
-            parts = re.split(r"[/-]", fecha)
-            fecha_clean = f"{int(parts[2]):04d}{int(parts[1]):02d}{int(parts[0]):02d}"
+        m_dmy = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", fecha)
+        m_ymd = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})", fecha)
+        if m_dmy:
+            fecha_clean = f"{int(m_dmy.group(3)):04d}{int(m_dmy.group(2)):02d}{int(m_dmy.group(1)):02d}"
+        elif m_ymd:
+            fecha_clean = f"{int(m_ymd.group(1)):04d}{int(m_ymd.group(2)):02d}{int(m_ymd.group(3)):02d}"
+        else:
+            digits = re.sub(r"\D", "", fecha)
+            if len(digits) >= 8:
+                d8 = digits[:8]
+                if 1990 <= int(d8[:4]) <= 2100:
+                    fecha_clean = d8
+                elif 1990 <= int(d8[4:8]) <= 2100:
+                    fecha_clean = f"{d8[4:8]}{d8[2:4]}{d8[0:2]}"
+                else:
+                    fecha_clean = d8
 
     # Monto Total
     monto_raw = normalized_keys.get("montototal") or normalized_keys.get("total") or normalized_keys.get("monto")
@@ -74,22 +84,20 @@ def _parse_dgii_params(params: Dict[str, list[str]]) -> Optional[Dict[str, str]]
         except ValueError:
             monto_clean = monto_raw
 
-    # ITBIS
-    itbis_raw = normalized_keys.get("montoitbis") or normalized_keys.get("itbis")
-    itbis_clean = "0.00"
-    if itbis_raw:
-        try:
-            itbis_clean = f"{float(itbis_raw.replace(',', '')):.2f}"
-        except ValueError:
-            itbis_clean = itbis_raw
-
     fields = {
         "rnc_cedula": rnc_clean,
         "ncf": encf_clean,
         "fecha_comprobante": fecha_clean,
         "monto_total": monto_clean,
-        "itbis_facturado": itbis_clean,
     }
+
+    # ITBIS (only set when present in QR payload so we do not mask taxed invoices whose QR omits MontoITBIS)
+    itbis_raw = normalized_keys.get("montoitbis") or normalized_keys.get("itbis")
+    if itbis_raw is not None:
+        try:
+            fields["itbis_facturado"] = f"{float(itbis_raw.replace(',', '')):.2f}"
+        except ValueError:
+            fields["itbis_facturado"] = itbis_raw
     
     if "codigoseguridad" in normalized_keys:
         fields["codigo_seguridad"] = normalized_keys["codigoseguridad"]
@@ -156,6 +164,25 @@ def extract_qr_from_image_bytes(image_bytes: bytes) -> Tuple[Optional[str], Opti
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if img is None:
             return None, None
+
+        # 0. Check with zxing-cpp if available (fastest and most accurate for dense DGII QR codes)
+        try:
+            import zxingcpp
+            for candidate in (img, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)):
+                barcodes = zxingcpp.read_barcodes(
+                    candidate,
+                    formats=zxingcpp.BarcodeFormat.QRCode,
+                    try_rotate=True,
+                    try_downscale=True,
+                )
+                for b in barcodes:
+                    if b.text:
+                        dgii = parse_dgii_qr_text(b.text)
+                        if dgii:
+                            return b.text, dgii
+                        return b.text, None
+        except Exception:
+            pass
 
         # Check with pyzbar if available
         try:

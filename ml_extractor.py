@@ -15,9 +15,55 @@ try:
 except ImportError:
     pd = None
 
-from ml.feature_engineering import tokenize, build_features
+from ml.feature_engineering import tokenize, build_features, parse_numeric
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_predicted_token(field_name: str, raw_text: str) -> str:
+    """Normaliza un token extraído por ML al formato estándar del Formato 606."""
+    t = raw_text.strip()
+    if field_name == "rnc_cedula":
+        digits = re.sub(r"\D", "", t)
+        return digits if len(digits) in (9, 11) else t
+    if field_name == "ncf":
+        clean = re.sub(r"[^A-Za-z0-9]", "", t).upper()
+        if clean and clean[0] in ("B", "E") and len(clean) >= 11:
+            tail = (
+                clean[1:]
+                .replace("O", "0")
+                .replace("I", "1")
+                .replace("L", "1")
+                .replace("S", "5")
+            )
+            return clean[0] + tail
+        return clean or t
+    if field_name == "fecha_comprobante":
+        cleaned = re.sub(r"(?<=\d)[iIl](?=\d)", "1", t)
+        cleaned = re.sub(r"(?<=[/-])[iIl](?=\d)", "1", cleaned)
+        cleaned = re.sub(r"(?<=\d)[oO](?=\d)", "0", cleaned)
+        m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", cleaned)
+        if m:
+            d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return f"{y:04d}{mo:02d}{d:02d}"
+        m2 = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})", cleaned)
+        if m2:
+            y, mo, d = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return f"{y:04d}{mo:02d}{d:02d}"
+        digits = re.sub(r"\D", "", cleaned)
+        if len(digits) == 8:
+            if 1990 <= int(digits[:4]) <= 2100:
+                return digits
+            if 1990 <= int(digits[4:]) <= 2100:
+                return f"{digits[4:]}{digits[2:4]}{digits[:2]}"
+        return t
+    if field_name in ("monto_total", "itbis_facturado"):
+        val = parse_numeric(t)
+        return f"{val:.2f}"
+    return t
 
 
 class MLFieldExtractor:
@@ -75,7 +121,8 @@ class MLFieldExtractor:
             
             if predicted_class != 'irrelevant' and max_prob > 0.5:
                 if predicted_class not in results or max_prob > results[predicted_class][1]:
-                    results[predicted_class] = (token_data['text'], float(max_prob))
+                    norm_val = normalize_predicted_token(predicted_class, token_data['text'])
+                    results[predicted_class] = (norm_val, float(max_prob))
                     
         return results
 

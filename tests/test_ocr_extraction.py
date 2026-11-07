@@ -108,5 +108,81 @@ class TestOCRExtraction(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertEqual(res.value, '101068744')
 
+    def test_real_glp_receipt_ncf_and_fields(self):
+        text = (
+            "CARDNET\nCOMERCIO: ESTACION SIGLO XXI\nTOTAL : RD$1,200.00\n"
+            "SiGLO XXI FACTURA DE CREDITO\nRNC:131240674 NCF:E310000036276\n"
+            "Fecha: 11/10/2026 Valida Hasta: 31/12/2026\n"
+            "RNC CLIENTE: 03100308018\nSubtotal 1,200.00\nIT8IS: 0.00\nTotal: 1.200.00"
+        )
+        eng = InvoiceOCREngine()
+        fields, _ = eng._parse_fields(text, buyer_rnc="03100308018")
+        self.assertEqual(fields.get("rnc_cedula"), "131240674")
+        self.assertEqual(fields.get("rnc_comprador"), "03100308018")
+        self.assertEqual(fields.get("ncf"), "E310000036276")
+        self.assertEqual(fields.get("fecha_comprobante"), "20261011")
+        self.assertEqual(fields.get("monto_total"), "1200.00")
+        self.assertEqual(fields.get("itbis_facturado"), "0.00")
+        self.assertEqual(fields.get("forma_pago"), "03")
+
+    def test_single_field_correction_callback_and_usd_validation(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from handlers.confirmation_handler import handle_confirmation_callback
+        from state_manager import state_manager, UserState
+        from fiscal_validators import validate_invoice
+
+        # 1. Verify USD converted invoice rounding tolerance passes validation
+        usd_inv = {
+            "rnc_cedula": "102613923",
+            "ncf": "E310000015210",
+            "fecha_comprobante": "20261015",
+            "monto_total": "1169.26",
+            "itbis_facturado": "178.60",
+            "monto_bienes": "990.66",
+            "monto_servicios": "0.00",
+            "tipo_bienes_servicios": "09",
+            "forma_pago": "04",
+            "tasa_cambio": "61.80",
+            "_usd_converted": True,
+        }
+        self.assertEqual(validate_invoice(usd_inv), [])
+
+        # 2. Verify field-specific correction menu and single-field prompt
+        chat_id = 999123
+        state_manager.clear_session(chat_id)
+        sess = state_manager.get_session(chat_id)
+        sess.state = UserState.WAITING_CONFIRMATION
+        sess.extracted_data = dict(usd_inv)
+        state_manager.update_session(chat_id, sess)
+
+        update = MagicMock()
+        update.message = None
+        update.effective_chat.id = chat_id
+        update.callback_query.data = "correct_invoice"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        update.callback_query.message.reply_text = AsyncMock()
+        update.effective_message = update.callback_query.message
+        context = MagicMock()
+
+        asyncio.run(handle_confirmation_callback(update, context))
+        # State remains WAITING_CONFIRMATION while showing the field menu
+        self.assertEqual(state_manager.get_session(chat_id).state, UserState.WAITING_CONFIRMATION)
+        update.callback_query.edit_message_text.assert_called_once()
+        _, kwargs = update.callback_query.edit_message_text.call_args
+        self.assertIsNotNone(kwargs.get("reply_markup"))
+
+        # Now select only NCF to correct
+        update.callback_query.data = "correct_field:ncf"
+        asyncio.run(handle_confirmation_callback(update, context))
+        sess_after = state_manager.get_session(chat_id)
+        self.assertEqual(sess_after.state, UserState.WAITING_MANUAL_FIELD)
+        self.assertEqual(sess_after.field_being_corrected, "ncf")
+        self.assertEqual(sess_after.missing_fields, ["ncf"])
+        # Allocation fields are preserved when correcting NCF
+        self.assertEqual(sess_after.extracted_data.get("monto_bienes"), "990.66")
+        state_manager.clear_session(chat_id)
+
 if __name__ == '__main__':
     unittest.main()

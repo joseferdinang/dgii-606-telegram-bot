@@ -28,16 +28,16 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
     buyer_rnc = active_company.rnc if active_company else None
 
     # 1. Extractor LLM (OpenAI ChatGPT)
+    # Si ya se obtuvieron todos los campos esenciales (ej: código QR de e-CF), no necesitamos consultar a ChatGPT
+    has_all_essential = bool(raw_fields.get("rnc_cedula") and raw_fields.get("ncf") and raw_fields.get("monto_total"))
     llm_extractor = context.bot_data.get("llm_extractor") if context and hasattr(context, "bot_data") else None
-    if llm_extractor and llm_extractor.is_available:
+    if not has_all_essential and llm_extractor and llm_extractor.is_available:
         try:
             llm_extracted = {}
-            # Comprobar si QR o Vision ya obtuvieron todos los campos esenciales (RNC, NCF, Monto Total)
-            has_essential_fields = bool(raw_fields.get("rnc_cedula") and raw_fields.get("ncf") and raw_fields.get("monto_total"))
 
-            # Si NO hay texto de OCR, o si faltan campos esenciales pero disponemos de la imagen / página PDF:
-            # ¡Activamos el modelo de visión multimodal de GPT directamente sobre la imagen!
-            if (not raw_text.strip() or not has_essential_fields) and image_bytes:
+            # Si NO hay texto de OCR o faltan campos esenciales pero disponemos de la imagen / página PDF:
+            # Activamos el modelo de visión multimodal de GPT directamente sobre la imagen
+            if image_bytes:
                 logger.info("Activando inspección visual directa con GPT Multimodal para chat_id=%s", chat_id)
                 llm_extracted = await asyncio.to_thread(llm_extractor.extract_from_image, image_bytes, buyer_rnc=buyer_rnc)
 
@@ -48,17 +48,17 @@ async def dispatch_ocr_result(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             if llm_extracted:
                 logger.info("LLM extraction completed for chat_id=%s. Extracted fields: %s", chat_id, list(llm_extracted.keys()))
-                # Preservar campos que vinieron del código QR (confianza 1.0)
-                qr_fields = {
+                # Preservar campos de alta confianza (QR / etiquetas verificadas >= 0.85)
+                high_conf_fields = {
                     k: v for k, v in raw_fields.items()
-                    if getattr(result, "confidence", {}).get(k) == 1.0
+                    if getattr(result, "confidence", {}).get(k, 0.0) >= 0.85 and v not in (None, "")
                 }
-                # Los campos de ChatGPT tienen alta prioridad sobre regex / heurística
+                # Los campos de ChatGPT complementan los faltantes o de baja confianza
                 for k, v in llm_extracted.items():
                     if v not in (None, ""):
                         raw_fields[k] = v
-                # Re-aplicar QR para asegurar integridad absoluta
-                raw_fields.update(qr_fields)
+                # Re-aplicar campos verificados para asegurar integridad absoluta
+                raw_fields.update(high_conf_fields)
         except Exception:
             logger.exception("Error running LLM extractor for chat_id=%s", chat_id)
 

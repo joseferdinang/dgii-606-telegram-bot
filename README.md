@@ -15,16 +15,18 @@ El bot genera directamente el archivo **TXT oficial** listo para importar en la 
 2. **Subida Múltiple Simultánea (Cola de Archivos):**
    - Soporte para enviar álbumes de fotos o múltiples documentos PDF al mismo tiempo.
    - El sistema encola los archivos en una cola FIFO persistente y los procesa de forma secuencial y fluida.
-3. **Extracción Multimodal con IA:**
-   - **QR e-CF Instantáneo:** Detección de timbre fiscal DGII (URL o delimitado por pipes) con prioridad 1.0 (100% exacto).
-   - **OpenAI GPT-4o-mini Multimodal Vision:** Inspección visual directa y por texto OCR.
-   - **Google Cloud Vision OCR:** Lectura y preprocesamiento de comprobantes físicos y electrónicos.
-   - **Machine Learning Local (Data Flywheel):** Clasificador Gradient Boosting que aprende continuamente con cada factura confirmada o corregida.
+3. **Extracción Multimodal con IA y OCR Híbrido:**
+   - **QR e-CF Instantáneo:** Detección de timbre fiscal DGII (URL o delimitado por pipes) con prioridad 1.0 (100% exacto y sin costo).
+   - **Motor OCR Tolerante y Local (RapidOCR + OpenCV):** Procesamiento local de imágenes con corrección de perspectiva, contraste adaptativo y soporte para formatos dominicanos no estándar (RNCs con guiones, impresoras matriciales y tablas de Ferretería Ochoa).
+   - **OpenAI GPT-4o-mini Multimodal Vision:** Inspección visual directa y fallback de rescate para facturas complejas o recortadas.
+   - **Google Cloud Vision OCR:** Lectura y preprocesamiento de alta fidelidad para documentos densos y comprobantes electrónicos.
+   - **Machine Learning Local (Data Flywheel):** Clasificador Gradient Boosting (`field_classifier.joblib`) que aprende y se re-entrena continuamente con cada factura confirmada o corregida.
 4. **Validaciones Fiscales DGII:**
    - Validación de dígito verificador: **Módulo 11** para RNCs y **Módulo 10 (Luhn)** para Cédulas.
-   - Reglas de comprobantes: B01, B02, B03, B04, B11, B14, B15, B16, B17 y e-CFs (E31 a E45).
+   - Reglas de comprobantes: B01, B02, B03, B04, B11, B14, B15, B16, B17 y e-CFs (E31 a E47).
    - Detección de duplicados en el lote actual e historial de auditoría contra períodos anteriores (`exported_invoices`).
-5. **Control y Resumen en Telegram:**
+5. **Corrección Campo por Campo y Control en Telegram:**
+   - **Edición Granular:** Al presionar `✏️ Corregir`, el bot despliega una botonera interactiva para cambiar únicamente el campo deseado (`RNC`, `NCF`, `Fecha`, `Total`, `ITBIS`, `Forma de Pago`) sin necesidad de reiniciar la factura.
    - Visualización de resumen financiero con acumulados de ITBIS, Bienes y Servicios (`/resumen`).
    - Retiro de comprobantes individuales (`/eliminar <NCF>`).
 
@@ -45,7 +47,7 @@ El bot genera directamente el archivo **TXT oficial** listo para importar en la 
 | `/cancelar_cola` | Limpia los archivos pendientes en la cola. |
 | `/cancelar` | Descarta la factura en revisión y toma la siguiente de la cola. |
 | `/descartar_lote` | Borra todo el lote actual y la cola. |
-| `/terminar` *(o escribir `Terminar`)* | Valida el lote, genera el **TXT para la DGII** y el **Excel de respaldo**. |
+| `/terminar` *(o `/exportar`)* | Valida el lote, genera el **TXT para la DGII** y el **Excel de respaldo**. |
 | `/reentrenar` | Fuerza el re-entrenamiento del clasificador ML con las facturas históricas. |
 
 ---
@@ -67,7 +69,7 @@ El bot genera directamente el archivo **TXT oficial** listo para importar en la 
 ├── state_manager.py          # Repositorio SQLite (sesiones, lotes, empresas, cola FIFO)
 ├── handlers/                 # Controladores modulares de Telegram
 │   ├── company_handler.py    # Login, registro y cambio de empresa
-│   ├── confirmation_handler.py # Botoneras interactivas, edición y guardado
+│   ├── confirmation_handler.py # Botoneras interactivas, edición individual y guardado
 │   ├── exchange_rate_handler.py # Conversión de facturas en USD a DOP
 │   ├── invoice_flow.py       # Ruteo post-OCR, validaciones y verificación de períodos
 │   ├── pdf_handler.py        # Recepción y conversión de PDFs a imágenes
@@ -75,9 +77,10 @@ El bot genera directamente el archivo **TXT oficial** listo para importar en la 
 │   └── queue_handler.py      # Procesador de cola multi-archivo FIFO
 ├── ml/                       # Machine Learning local
 │   ├── feature_engineering.py # Tokenización y vectorización de características
+│   ├── models/               # Modelo entrenado (field_classifier.joblib)
 │   ├── synthetic_generator.py # Generador de datos sintéticos dominicanos
 │   └── train.py              # Script offline de entrenamiento base
-└── tests/                    # Suite de 122 pruebas unitarias
+└── tests/                    # Suite de 134 pruebas unitarias
 ```
 
 ---

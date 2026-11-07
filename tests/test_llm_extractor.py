@@ -110,6 +110,13 @@ class TestLLMFieldExtractor(unittest.TestCase):
         result = extractor.extract_from_text("Factura texto")
         self.assertEqual(result, {})
 
+    def test_schema_validity_for_strict_structured_outputs(self):
+        from llm_extractor import EXTRACTION_SCHEMA
+        props = EXTRACTION_SCHEMA["properties"]
+        required = EXTRACTION_SCHEMA["required"]
+        self.assertEqual(set(props.keys()), set(required), "All properties in strict schema must be in required")
+        self.assertFalse(EXTRACTION_SCHEMA["additionalProperties"])
+
 
 if __name__ == "__main__":
     unittest.main()

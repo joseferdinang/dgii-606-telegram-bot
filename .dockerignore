@@ -1,9 +1,15 @@
 .git
 .env
+env
 env.txt
+.venv/
+venv/
 credentials/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 data/
 tests/__pycache__/
+*.db
+*.sqlite
+*.sqlite3

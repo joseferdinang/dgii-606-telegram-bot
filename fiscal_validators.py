@@ -357,7 +357,18 @@ def validate_invoice(
             ))
 
         maximum_itbis = ((base + isc) * Decimal("0.18")).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
-        if itbis > maximum_itbis + ITBIS_ROUNDING_TOLERANCE:
+        effective_itbis_tol = ITBIS_ROUNDING_TOLERANCE
+        if data.get("tasa_cambio") or data.get("_usd_converted"):
+            try:
+                rate_dec = Decimal(str(data.get("tasa_cambio") or "65"))
+                if rate_dec > Decimal("1"):
+                    effective_itbis_tol = max(
+                        ITBIS_ROUNDING_TOLERANCE,
+                        (Decimal("0.01") * rate_dec).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP),
+                    )
+            except Exception:
+                pass
+        if itbis > maximum_itbis + effective_itbis_tol:
             issues.append(ValidationIssue("itbis_facturado", "El ITBIS no puede exceder el 18% de la base imponible más ISC."))
 
         if itbis_ret > itbis:

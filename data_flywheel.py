@@ -140,9 +140,11 @@ def retrain_model_from_corpus(
         try:
             import joblib
             import pandas as pd
+            import re
             from sklearn.ensemble import HistGradientBoostingClassifier
             from ml.feature_engineering import tokenize, build_features, parse_numeric
             from ml.synthetic_generator import generate_dataset
+            from ml_extractor import normalize_predicted_token
         except ImportError as e:
             logger.warning("ML libraries not installed: %s", e)
             return {"status": "dependency_missing", "message": str(e)}
@@ -182,22 +184,48 @@ def retrain_model_from_corpus(
 
             fecha = str(s.get("fecha_comprobante") or "").strip()
 
+            df_tok = build_features(tokens)
             labels = []
-            for t in tokens:
+            for idx, t in enumerate(tokens):
                 t_clean = t["text"].replace("-", "").replace(".", "").replace(",", "")
                 t_upper = t["text"].upper().replace(" ", "")
                 val_num = parse_numeric(t["text"])
+                has_dec = bool(df_tok.iloc[idx]["has_decimal_separator"])
+                has_excl = bool(df_tok.iloc[idx]["ctx_has_exclusion_label"])
+                has_sub = bool(df_tok.iloc[idx]["ctx_has_subtotal_label"])
+                has_tot = bool(df_tok.iloc[idx]["ctx_has_total_label"])
+                has_itb = bool(df_tok.iloc[idx]["ctx_has_itbis_label"])
+                norm_date = normalize_predicted_token("fecha_comprobante", t["text"])
 
                 if rnc and (rnc == t_clean or (len(t_clean) >= 9 and rnc in t_clean)):
                     labels.append({"label": "rnc_cedula"})
                 elif ncf and (ncf == t_upper or (len(t_upper) >= 11 and ncf in t_upper)):
                     labels.append({"label": "ncf"})
-                elif total_num is not None and abs(val_num - total_num) < 0.01 and total_num > 0:
-                    labels.append({"label": "monto_total"})
-                elif itbis_num is not None and abs(val_num - itbis_num) < 0.01:
-                    labels.append({"label": "itbis_facturado"})
-                elif fecha and (fecha == t_clean or (len(t_clean) == 8 and t_clean == fecha)):
+                elif (
+                    fecha
+                    and norm_date == fecha
+                    and not has_excl
+                ):
                     labels.append({"label": "fecha_comprobante"})
+                elif (
+                    total_num is not None
+                    and has_dec
+                    and abs(val_num - total_num) < 0.01
+                    and total_num > 0
+                    and has_tot
+                    and not has_sub
+                    and not has_excl
+                ):
+                    labels.append({"label": "monto_total"})
+                elif (
+                    itbis_num is not None
+                    and has_dec
+                    and abs(val_num - itbis_num) < 0.01
+                    and has_itb
+                    and not has_sub
+                    and not has_excl
+                ):
+                    labels.append({"label": "itbis_facturado"})
                 else:
                     labels.append({"label": "irrelevant"})
 
