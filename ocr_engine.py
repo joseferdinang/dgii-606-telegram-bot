@@ -948,11 +948,13 @@ class InvoiceOCREngine:
                     return FieldConfidence(value=result, confidence=0.92, source="voucher")
 
         # Voucher Azul / POS con separador OCR deformado (ej. 07109126 -> 07/09/26)
-        m_azul_date = re.search(r"\b([0-3]\d)[/\-1I](0[1-9]|1[0-2])[/\-1I](26|2026)\b\s+\d{1,2}:\d{2}", texto_limpio)
+        m_azul_date = re.search(r"\b([0-3]\d)[/\-1I|](0[1-9]|1[0-2])[/\-1I|](20\d{2}|2[0-9])\b", texto_limpio)
         if m_azul_date:
             d = int(m_azul_date.group(1))
             m_v = int(m_azul_date.group(2))
-            res_d = _make(2026, m_v, d)
+            y_raw = m_azul_date.group(3)
+            year = _resolve_2digit_year(y_raw) if len(y_raw) == 2 else int(y_raw)
+            res_d = _make(year, m_v, d)
             if res_d:
                 return FieldConfidence(value=res_d, confidence=0.91, source="voucher")
 
@@ -1061,8 +1063,9 @@ class InvoiceOCREngine:
         """
         Extrae el monto total de la factura con 5 estrategias en cascada.
         """
-        _CUR = r"(?:RD\s*\$|US\s*\$|DOP|USD|\$)?\s*"
-        _SEP = r"\s*(?:[:.#\-–—>=)>]|--\)|-->|->|\)\s*[:.])*\s*"
+        _HSP = r"[^\S\r\n]*"
+        _CUR = rf"(?:RD{_HSP}\$|US{_HSP}\$|DOP|USD|\$)?{_HSP}"
+        _SEP = rf"{_HSP}(?:[:.#\-–—>=)>]|--\)|-->|->|\){_HSP}[:.])*{_HSP}"
         _AMT = r"([\d][\d.,]+)"
 
         # ---- PRIORIDAD 0: Formato Ferretería Ochoa multi-columna ("TOTAL A PAGAR <itbis> <total>") ----
@@ -1112,6 +1115,17 @@ class InvoiceOCREngine:
             if p1_matches:
                 return FieldConfidence(value=p1_matches[-1], confidence=0.9, source="labeled")
 
+        # ---- PRIORIDAD 1.5: Monto inmediatamente anterior a TOTAL (ej: "RD$1,500.00 TOTAL :") ----
+        m_pre_total = re.findall(
+            rf"{_CUR}{_AMT}{_HSP}[:.#\-]?{_HSP}\b(?:TOTAL|LOTAL)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if m_pre_total:
+            val = cls._normalize_amount(m_pre_total[-1])
+            if val:
+                return FieldConfidence(value=val, confidence=0.91, source="labeled")
+
         # ---- PRIORIDAD 2: "TOTAL" genérico línea por línea ----
         _EXCLUIR = re.compile(
             r"ITBIS|\bTAX\b|ISR|RETENCI[OÓ]N|DESCUENTO|\bDESC\b|DISCOUNT|PROPINA|\bTIP\b"
@@ -1120,7 +1134,7 @@ class InvoiceOCREngine:
         )
         total_matches = []
         for m in re.finditer(
-            rf"^[^\n]*\b(?:TOTAL|LOTAL)\b[^\n]*?{_CUR}{_AMT}[^\n]*$",
+            rf"^[^\r\n]*\b(?:TOTAL|LOTAL)\b[^\r\n]*?{_CUR}{_AMT}[^\r\n]*$",
             text,
             re.IGNORECASE | re.MULTILINE,
         ):
@@ -1200,8 +1214,9 @@ class InvoiceOCREngine:
         Extrae el ITBIS FACTURADO (columna N del Formato 606) con varios
         patrones en orden de especificidad. Cubre: ITBIS, IMPUESTOS, TAX, IVA, IGV, VAT.
         """
-        _CUR = r"(?:RD\s*\$|US\s*\$|DOP|USD|\$)?\s*"
-        _SEP = r"\s*(?:[:.#\-–—>=)>]|--\)|-->|->|\)\s*[:.])*\s*"
+        _HSP = r"[^\S\r\n]*"
+        _CUR = rf"(?:RD{_HSP}\$|US{_HSP}\$|DOP|USD|\$)?{_HSP}"
+        _SEP = rf"{_HSP}(?:[:.#\-–—>=)>]|--\)|-->|->|\){_HSP}[:.])*{_HSP}"
         _AMT = r"([\d][\d.,]+)"
 
         _NO_FACTURADO = r"(?!\s*(?:RETENIDO|PERCIBID[OA]|PROPORCIONAL|COSTO|ADELANTAR|SUJETO))"
@@ -1306,7 +1321,10 @@ class InvoiceOCREngine:
         if tax_matches:
             return FieldConfidence(value=tax_matches[-1], confidence=0.6, source="pattern")
 
-        # ---- PASO 5: Comprobantes exentos donde Subtotal == Total ----
+        # ---- PASO 5: Comprobantes exentos donde Subtotal == Total o de combustibles ----
+        if re.search(r"\b(?:GLP|GASOLINA|GASOIL|DIESEL|COMBUSTIBLE)\b", text, re.IGNORECASE):
+            return FieldConfidence(value="0.00", confidence=0.85, source="fuel_exempt")
+
         m_sub = re.search(rf"SUB\s*TOTAL{_SEP}{_CUR}{_AMT}", text, re.IGNORECASE)
         m_tot = re.search(rf"\b(?:TOTAL|LOTAL)\s*[:.]\s*{_CUR}{_AMT}", text, re.IGNORECASE)
         if m_sub and m_tot:
