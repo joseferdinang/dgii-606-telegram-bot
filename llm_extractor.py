@@ -166,6 +166,11 @@ EXTRACTION_SCHEMA = {
 }
 
 
+def _is_reasoning_model(model: str) -> bool:
+    m = model.lower()
+    return any(k in m for k in ("luna", "o1", "o3", "o4"))
+
+
 class LLMFieldExtractor:
     """Uses OpenAI models (ChatGPT / GPT-4o-mini) to extract Dominican invoice fields."""
 
@@ -194,6 +199,10 @@ class LLMFieldExtractor:
             return {}
 
         try:
+            extra_params = {}
+            if not _is_reasoning_model(self.model):
+                extra_params["temperature"] = 0.0
+
             response = self._client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -214,7 +223,7 @@ class LLMFieldExtractor:
                         "schema": EXTRACTION_SCHEMA,
                     },
                 },
-                temperature=0.0,
+                **extra_params,
             )
 
             result_json = response.choices[0].message.content
@@ -233,6 +242,10 @@ class LLMFieldExtractor:
         try:
             b64_image = base64.b64encode(image_bytes).decode("utf-8")
             image_url = f"data:{mime_type};base64,{b64_image}"
+
+            extra_params = {}
+            if not _is_reasoning_model(self.model):
+                extra_params["temperature"] = 0.0
 
             response = self._client.chat.completions.create(
                 model=self.model,
@@ -260,7 +273,7 @@ class LLMFieldExtractor:
                         "schema": EXTRACTION_SCHEMA,
                     },
                 },
-                temperature=0.0,
+                **extra_params,
             )
 
             result_json = response.choices[0].message.content
